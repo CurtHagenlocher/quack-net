@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Quack.Serialization;
 using Quack.Types;
 
@@ -36,12 +37,120 @@ internal static class VectorReader
             case VectorType.Sequence:
                 return ReadSequence(reader, type, count);
             case VectorType.Dictionary:
+                return ReadDictionary(reader, type, count);
             case VectorType.Fsst:
                 throw new SerializationException(
                     $"VectorType.{vectorType} is not yet supported by the MVP client.");
             default:
                 throw new SerializationException($"Unknown VectorType value {(int)vectorType}.");
         }
+    }
+
+    // Dictionary vector wire layout (Vector::Serialize, DICTIONARY_VECTOR branch):
+    //   field 91  sel_vector  -- raw bytes (uint32 selection index per row), LEB128-prefixed
+    //   field 92  dict_count  -- idx_t (uint64 LEB128)
+    //   then the inner dictionary is serialized recursively with count = dict_count
+    //   and compressed_serialization = false, so it appears as a FLAT vector.
+    // We materialize to a flat output column (dict[sel[i]] for each row i),
+    // propagating null entries via the validity mask.
+    private static DuckDbColumn ReadDictionary(BinaryDeserializer reader, LogicalType type, int count)
+    {
+        reader.BeginProperty(fieldId: 91);
+        ReadOnlyMemory<byte> selBytes = reader.ReadDataMemory();
+        int expectedSelBytes = sizeof(uint) * count;
+        if (selBytes.Length != expectedSelBytes)
+        {
+            throw new SerializationException(
+                $"Dictionary sel_vector is {selBytes.Length} bytes; expected {expectedSelBytes} ({sizeof(uint)} per row * {count} rows).");
+        }
+
+        reader.BeginProperty(fieldId: 92);
+        ulong dictCount = reader.ReadUInt64();
+
+        DuckDbColumn dictionary = Read(reader, type, checked((int)dictCount));
+
+        return ExpandDictionary(dictionary, selBytes, count);
+    }
+
+    private static DuckDbColumn ExpandDictionary(DuckDbColumn dictionary, ReadOnlyMemory<byte> selBytes, int count)
+    {
+        ReadOnlySpan<uint> sel = MemoryMarshal.Cast<byte, uint>(selBytes.Span);
+
+        // Sanity-check every index up front so we get a clear error rather
+        // than a buffer overflow on a bogus selection vector.
+        for (int i = 0; i < count; i++)
+        {
+            if (sel[i] >= (uint)dictionary.Count)
+            {
+                throw new SerializationException(
+                    $"Dictionary sel_vector[{i}] = {sel[i]} is out of range for dictionary size {dictionary.Count}.");
+            }
+        }
+
+        ValidityMask validity = BuildValidityFromDictionary(dictionary.Validity, sel, count);
+
+        switch (dictionary)
+        {
+            case FixedSizeColumn fixedDict:
+            {
+                byte[] data = new byte[fixedDict.ElementSize * count];
+                ReadOnlySpan<byte> dictData = fixedDict.Data.Span;
+                int elemSize = fixedDict.ElementSize;
+                for (int i = 0; i < count; i++)
+                {
+                    int src = (int)sel[i] * elemSize;
+                    dictData.Slice(src, elemSize).CopyTo(data.AsSpan(i * elemSize, elemSize));
+                }
+                return new FixedSizeColumn
+                {
+                    Type = dictionary.Type,
+                    Count = count,
+                    Validity = validity,
+                    Data = data,
+                    ElementSize = elemSize,
+                };
+            }
+            case StringColumn stringDict:
+            {
+                string?[] values = new string?[count];
+                for (int i = 0; i < count; i++)
+                {
+                    values[i] = stringDict.Values[(int)sel[i]];
+                }
+                return new StringColumn
+                {
+                    Type = dictionary.Type,
+                    Count = count,
+                    Validity = validity,
+                    Values = values,
+                };
+            }
+            default:
+                throw new SerializationException(
+                    $"Dictionary expansion is not yet supported for column kind '{dictionary.GetType().Name}'.");
+        }
+    }
+
+    private static ValidityMask BuildValidityFromDictionary(ValidityMask dictionaryValidity, ReadOnlySpan<uint> sel, int count)
+    {
+        if (dictionaryValidity.IsAllValid)
+        {
+            return ValidityMask.AllValid;
+        }
+        byte[] mask = new byte[ValidityMask.RequiredByteCount(count)];
+        bool anyValid = false;
+        for (int i = 0; i < count; i++)
+        {
+            if (dictionaryValidity.IsValid((int)sel[i]))
+            {
+                mask[i >> 3] |= (byte)(1 << (i & 7));
+                anyValid = true;
+            }
+        }
+        // If every output row turned out null, we still need to emit a mask
+        // (caller can't distinguish "no rows" from "all null" otherwise).
+        _ = anyValid;
+        return new ValidityMask(mask);
     }
 
     private static DuckDbColumn ReadFlat(BinaryDeserializer reader, LogicalType type, int count)
