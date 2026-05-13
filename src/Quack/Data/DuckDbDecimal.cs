@@ -41,7 +41,7 @@ public static class DuckDbDecimal
             2 => BinaryPrimitives.ReadInt16LittleEndian(bytes),
             4 => BinaryPrimitives.ReadInt32LittleEndian(bytes),
             8 => BinaryPrimitives.ReadInt64LittleEndian(bytes),
-            16 => ReadHugeintLayout(bytes),
+            16 => HugeintLayout.ReadSigned(bytes),
             _ => throw new InvalidOperationException(
                 $"Unexpected DECIMAL element size {column.ElementSize}."),
         };
@@ -153,21 +153,6 @@ public static class DuckDbDecimal
         return negative ? -result : result;
     }
 
-    private static Int128 ReadHugeintLayout(ReadOnlySpan<byte> bytes)
-    {
-        long upper = BinaryPrimitives.ReadInt64LittleEndian(bytes[..8]);
-        ulong lower = BinaryPrimitives.ReadUInt64LittleEndian(bytes.Slice(8, 8));
-        return ((Int128)upper << 64) | lower;
-    }
-
-    private static void WriteHugeintLayout(Span<byte> destination, Int128 value)
-    {
-        long upper = (long)(value >> 64);
-        ulong lower = (ulong)value;
-        BinaryPrimitives.WriteInt64LittleEndian(destination[..8], upper);
-        BinaryPrimitives.WriteUInt64LittleEndian(destination.Slice(8, 8), lower);
-    }
-
     private static void WriteMantissa(Span<byte> destination, Int128 value, int elementSize)
     {
         switch (elementSize)
@@ -197,7 +182,7 @@ public static class DuckDbDecimal
                 BinaryPrimitives.WriteInt64LittleEndian(destination, (long)value);
                 break;
             case 16:
-                WriteHugeintLayout(destination, value);
+                HugeintLayout.WriteSigned(destination, value);
                 break;
             default:
                 throw new InvalidOperationException($"Unexpected DECIMAL element size {elementSize}.");
