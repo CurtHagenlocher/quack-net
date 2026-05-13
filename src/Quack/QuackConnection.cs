@@ -10,6 +10,14 @@ namespace Quack;
 // ConnectionRequest and stashes the server-assigned session id; the id is
 // echoed in every subsequent request header until DisposeAsync sends the
 // DisconnectMessage.
+//
+// Cancellation caveat: cancelling a CancellationToken passed to any *Async
+// method aborts the local HTTP request immediately, but the v1.5-variegata
+// server has no equivalent of Connection::Interrupt() wired into its HTTP
+// handler. So a long-running query keeps executing server-side until it
+// completes on its own — the cancel saves client CPU/memory, not server
+// work. DisposeAsync (which sends DisconnectMessage) is still the only way
+// to make the server release the session.
 public sealed class QuackConnection : IAsyncDisposable
 {
     private readonly QuackTransport _transport;

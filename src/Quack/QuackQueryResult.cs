@@ -10,6 +10,11 @@ namespace Quack;
 // with the PrepareResponse; subsequent batches are pulled via FetchRequest.
 // Iterate via GetChunksAsync until the server returns a FetchResponse with
 // no chunks, which is the authoritative end-of-stream signal.
+//
+// Cancelling the token passed to GetChunksAsync/ToListAsync aborts the local
+// HTTP wait for the next batch but does not interrupt server-side execution
+// of the query that produced this result — see the cancellation note on
+// QuackConnection for the underlying reason (v1.5-variegata).
 public sealed class QuackQueryResult
 {
     private readonly QuackTransport _transport;
