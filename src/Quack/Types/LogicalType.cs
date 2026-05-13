@@ -97,9 +97,16 @@ public sealed class LogicalType : IEquatable<LogicalType>
         ExtraTypeInfo? typeInfo = null;
         if (reader.TryBeginProperty(fieldId: 101))
         {
-            reader.BeginObject();
-            typeInfo = ExtraTypeInfo.Deserialize(reader);
-            reader.EndObject();
+            // shared_ptr<T> values are written via WriteValue<T*> which emits
+            // a Nullable wrapper (bool present byte) AROUND the inner object.
+            bool present = reader.BeginNullable();
+            if (present)
+            {
+                reader.BeginObject();
+                typeInfo = ExtraTypeInfo.Deserialize(reader);
+                reader.EndObject();
+            }
+            reader.EndNullable();
         }
         reader.EndObject();
         return new LogicalType(id, typeInfo);
@@ -111,12 +118,15 @@ public sealed class LogicalType : IEquatable<LogicalType>
         if (TypeInfo is not null)
         {
             // field 101 type_info: WritePropertyWithDefault<shared_ptr<T>> with
-            // a non-null value writes the field id followed by the value wrapped
-            // in an object (via WriteValue<T-has-Serialize>).
+            // a non-null value writes the field id followed by WriteValue<T*>
+            // which wraps the value in a Nullable (bool present byte) followed
+            // by the has-Serialize object wrapping.
             s.WriteFieldId(101);
+            s.BeginNullable(true);
             s.BeginObject();
             TypeInfo.Serialize(s);
             s.EndObject();
+            s.EndNullable();
         }
     }
 

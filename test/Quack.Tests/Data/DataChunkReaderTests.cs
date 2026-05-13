@@ -277,10 +277,13 @@ public class DataChunkReaderTests
         s.WriteProperty(fieldId: 100, (byte)type.Id);
         if (type.TypeInfo is not null)
         {
+            // shared_ptr<T> wraps the value in a Nullable + has-Serialize object.
             s.WriteFieldId(101);
+            s.BeginNullable(true);
             s.BeginObject();
             WriteTypeInfo(s, type.TypeInfo);
             s.EndObject();
+            s.EndNullable();
         }
         s.EndObject();
     }
