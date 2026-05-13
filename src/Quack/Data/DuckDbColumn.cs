@@ -31,11 +31,16 @@ public sealed class FixedSizeColumn : DuckDbColumn
         Data.Span.Slice(rowIndex * ElementSize, ElementSize);
 }
 
-// VARCHAR / BLOB / BIT / GEOMETRY-as-WKB column. Null entries are represented
-// by null values in the array (independently of the validity mask).
-public sealed class StringColumn : DuckDbColumn
+// VARCHAR / BLOB / BIT / GEOMETRY-as-WKB column. Holds raw UTF-8 / binary
+// payloads — decoding to System.String is left to the consuming layer so
+// that BLOB is not lossy and so an Arrow handoff doesn't pay for a string
+// round-trip. Null entries are represented by null elements in the array
+// (independently of the validity mask); empty payloads are an empty slice.
+// Reader-returned slices alias the wire buffer; copy with .ToArray() if you
+// need to outlive that buffer.
+public sealed class VarBytesColumn : DuckDbColumn
 {
-    public required string?[] Values { get; init; }
+    public required ReadOnlyMemory<byte>?[] Values { get; init; }
 }
 
 // LIST or MAP column. Each row carries (offset, length) into the flat child

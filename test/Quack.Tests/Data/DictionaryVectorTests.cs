@@ -56,9 +56,14 @@ public class DictionaryVectorTests
             });
 
         DuckDbChunk chunk = DataChunkReader.Read(new BinaryDeserializer(bytes));
-        StringColumn col = Assert.IsType<StringColumn>(chunk.Columns[0]);
+        VarBytesColumn col = Assert.IsType<VarBytesColumn>(chunk.Columns[0]);
 
-        Assert.Equal(new[] { "alpha", "beta", "alpha", "beta", "alpha" }, col.Values);
+        string[] expected = ["alpha", "beta", "alpha", "beta", "alpha"];
+        Assert.Equal(expected.Length, col.Values.Length);
+        for (int i = 0; i < expected.Length; i++)
+        {
+            Assert.Equal(System.Text.Encoding.UTF8.GetBytes(expected[i]), col.Values[i]!.Value.ToArray());
+        }
     }
 
     [Fact]

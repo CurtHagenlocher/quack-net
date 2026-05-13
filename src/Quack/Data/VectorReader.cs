@@ -110,14 +110,14 @@ internal static class VectorReader
                     ElementSize = elemSize,
                 };
             }
-            case StringColumn stringDict:
+            case VarBytesColumn bytesDict:
             {
-                string?[] values = new string?[count];
+                ReadOnlyMemory<byte>?[] values = new ReadOnlyMemory<byte>?[count];
                 for (int i = 0; i < count; i++)
                 {
-                    values[i] = stringDict.Values[(int)sel[i]];
+                    values[i] = bytesDict.Values[(int)sel[i]];
                 }
-                return new StringColumn
+                return new VarBytesColumn
                 {
                     Type = dictionary.Type,
                     Count = count,
@@ -224,7 +224,7 @@ internal static class VectorReader
         }
     }
 
-    private static StringColumn ReadVarcharColumn(BinaryDeserializer reader, LogicalType type, int count, ValidityMask validity)
+    private static VarBytesColumn ReadVarcharColumn(BinaryDeserializer reader, LogicalType type, int count, ValidityMask validity)
     {
         reader.BeginProperty(fieldId: 102);
         ulong listCount = reader.BeginList();
@@ -233,14 +233,17 @@ internal static class VectorReader
             throw new SerializationException(
                 $"VARCHAR vector list count {listCount} does not match row count {count}.");
         }
-        string?[] values = new string?[count];
+        ReadOnlyMemory<byte>?[] values = new ReadOnlyMemory<byte>?[count];
         for (int i = 0; i < count; i++)
         {
-            string raw = reader.ReadString();
-            values[i] = validity.IsValid(i) ? raw : null;
+            // ReadDataMemory: LEB128 length + raw bytes, returned as a slice
+            // of the wire buffer. Same wire shape as ReadString but without
+            // UTF-8 decode (so BLOB and VARCHAR share a code path).
+            ReadOnlyMemory<byte> raw = reader.ReadDataMemory();
+            values[i] = validity.IsValid(i) ? raw : (ReadOnlyMemory<byte>?)null;
         }
         reader.EndList();
-        return new StringColumn { Type = type, Count = count, Validity = validity, Values = values };
+        return new VarBytesColumn { Type = type, Count = count, Validity = validity, Values = values };
     }
 
     private static StructColumn ReadStructColumn(BinaryDeserializer reader, LogicalType type, int count, ValidityMask validity)
@@ -393,14 +396,14 @@ internal static class VectorReader
                 ElementSize = fixedCol.ElementSize,
             };
         }
-        if (singleton is StringColumn stringCol)
+        if (singleton is VarBytesColumn bytesCol)
         {
-            string?[] expanded = new string?[count];
-            Array.Fill(expanded, stringCol.Values[0]);
-            ValidityMask expandedValidity = stringCol.Validity.IsAllValid && stringCol.Validity.IsValid(0)
+            ReadOnlyMemory<byte>?[] expanded = new ReadOnlyMemory<byte>?[count];
+            Array.Fill(expanded, bytesCol.Values[0]);
+            ValidityMask expandedValidity = bytesCol.Validity.IsAllValid && bytesCol.Validity.IsValid(0)
                 ? ValidityMask.AllValid
-                : BroadcastValidity(stringCol.Validity, count);
-            return new StringColumn { Type = singleton.Type, Count = count, Validity = expandedValidity, Values = expanded };
+                : BroadcastValidity(bytesCol.Validity, count);
+            return new VarBytesColumn { Type = singleton.Type, Count = count, Validity = expandedValidity, Values = expanded };
         }
         throw new SerializationException(
             $"ConstantVector broadcast not supported for column kind '{singleton.GetType().Name}'.");

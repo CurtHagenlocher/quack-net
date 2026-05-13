@@ -35,8 +35,8 @@ internal static class VectorWriter
             case FixedSizeColumn fixedCol:
                 WriteFixedSizeColumn(s, fixedCol, count);
                 break;
-            case StringColumn stringCol:
-                WriteStringColumn(s, stringCol, count);
+            case VarBytesColumn bytesCol:
+                WriteVarBytesColumn(s, bytesCol, count);
                 break;
             case StructColumn structCol:
                 WriteStructColumn(s, structCol, count);
@@ -65,21 +65,22 @@ internal static class VectorWriter
         s.WriteBlob(col.Data.Span);
     }
 
-    private static void WriteStringColumn(BinarySerializer s, StringColumn col, int count)
+    private static void WriteVarBytesColumn(BinarySerializer s, VarBytesColumn col, int count)
     {
         if (col.Values.Length != count)
         {
             throw new SerializationException(
-                $"StringColumn has {col.Values.Length} values; expected {count}.");
+                $"VarBytesColumn has {col.Values.Length} values; expected {count}.");
         }
         s.WriteFieldId(102);
         s.BeginList((ulong)count);
         for (int i = 0; i < count; i++)
         {
-            // Null entries are represented by the validity mask; the string
-            // slot itself is written as the empty string (matching duckdb's
+            // Null entries are represented by the validity mask; the slot
+            // itself is written as an empty payload (matching duckdb's
             // NullValue<string_t>() which is empty).
-            s.WriteString(col.Values[i] ?? string.Empty);
+            ReadOnlySpan<byte> payload = col.Values[i].GetValueOrDefault().Span;
+            s.WriteBlob(payload);
         }
         s.EndList();
     }

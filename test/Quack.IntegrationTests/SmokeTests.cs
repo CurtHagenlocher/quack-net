@@ -85,7 +85,7 @@ public class SmokeTests : IClassFixture<QuackServerFixture>
         Assert.Equal(LogicalTypeId.Varchar, result.ColumnTypes[0].Id);
         IReadOnlyList<DuckDbChunk> chunks = await result.ToListAsync();
 
-        StringColumn col = Assert.IsType<StringColumn>(chunks[0].Columns[0]);
-        Assert.Equal("hello world", col.Values[0]);
+        VarBytesColumn col = Assert.IsType<VarBytesColumn>(chunks[0].Columns[0]);
+        Assert.Equal("hello world"u8.ToArray(), col.Values[0]!.Value.ToArray());
     }
 }

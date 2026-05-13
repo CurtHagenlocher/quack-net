@@ -39,14 +39,14 @@ public class AppendTests : IClassFixture<QuackServerFixture>
 
         DuckDbChunk first = back[0];
         FixedSizeColumn idCol = Assert.IsType<FixedSizeColumn>(first.Columns[0]);
-        StringColumn nameCol = Assert.IsType<StringColumn>(first.Columns[1]);
+        VarBytesColumn nameCol = Assert.IsType<VarBytesColumn>(first.Columns[1]);
         for (int i = 0; i < first.RowCount; i++)
         {
             Assert.Equal(i + 1, BinaryPrimitives.ReadInt32LittleEndian(idCol.GetBytes(i)));
         }
-        Assert.Equal("alpha", nameCol.Values[0]);
-        Assert.Equal("beta", nameCol.Values[1]);
-        Assert.Equal("gamma", nameCol.Values[2]);
+        Assert.Equal("alpha"u8.ToArray(), nameCol.Values[0]!.Value.ToArray());
+        Assert.Equal("beta"u8.ToArray(), nameCol.Values[1]!.Value.ToArray());
+        Assert.Equal("gamma"u8.ToArray(), nameCol.Values[2]!.Value.ToArray());
     }
 
     [Fact]
@@ -76,11 +76,11 @@ public class AppendTests : IClassFixture<QuackServerFixture>
                     Data = Int32Bytes(10, 0, 30),
                     Validity = new ValidityMask(mask),
                 },
-                new StringColumn
+                new VarBytesColumn
                 {
                     Type = varcharType,
                     Count = 3,
-                    Values = ["a", "b", "c"],
+                    Values = [(ReadOnlyMemory<byte>)"a"u8.ToArray(), (ReadOnlyMemory<byte>)"b"u8.ToArray(), (ReadOnlyMemory<byte>)"c"u8.ToArray()],
                 },
             ],
             RowCount = 3,
@@ -94,16 +94,16 @@ public class AppendTests : IClassFixture<QuackServerFixture>
 
         DuckDbChunk result = back[0];
         FixedSizeColumn idCol = Assert.IsType<FixedSizeColumn>(result.Columns[0]);
-        StringColumn nameCol = Assert.IsType<StringColumn>(result.Columns[1]);
+        VarBytesColumn nameCol = Assert.IsType<VarBytesColumn>(result.Columns[1]);
 
         // ORDER BY name -> rows return as (a=10), (b=NULL), (c=30).
         Assert.Equal(3, result.RowCount);
         Assert.False(idCol.IsNull(0));
         Assert.True(idCol.IsNull(1));
         Assert.False(idCol.IsNull(2));
-        Assert.Equal("a", nameCol.Values[0]);
-        Assert.Equal("b", nameCol.Values[1]);
-        Assert.Equal("c", nameCol.Values[2]);
+        Assert.Equal("a"u8.ToArray(), nameCol.Values[0]!.Value.ToArray());
+        Assert.Equal("b"u8.ToArray(), nameCol.Values[1]!.Value.ToArray());
+        Assert.Equal("c"u8.ToArray(), nameCol.Values[2]!.Value.ToArray());
         Assert.Equal(10, BinaryPrimitives.ReadInt32LittleEndian(idCol.GetBytes(0)));
         Assert.Equal(30, BinaryPrimitives.ReadInt32LittleEndian(idCol.GetBytes(2)));
     }
@@ -127,6 +127,11 @@ public class AppendTests : IClassFixture<QuackServerFixture>
         }
         LogicalType intType = new(LogicalTypeId.Integer);
         LogicalType varcharType = new(LogicalTypeId.Varchar);
+        ReadOnlyMemory<byte>?[] nameBytes = new ReadOnlyMemory<byte>?[names.Length];
+        for (int i = 0; i < names.Length; i++)
+        {
+            nameBytes[i] = names[i] is null ? null : (ReadOnlyMemory<byte>?)System.Text.Encoding.UTF8.GetBytes(names[i]!);
+        }
         return new DuckDbChunk
         {
             Types = [intType, varcharType],
@@ -139,11 +144,11 @@ public class AppendTests : IClassFixture<QuackServerFixture>
                     ElementSize = 4,
                     Data = Int32Bytes(ids),
                 },
-                new StringColumn
+                new VarBytesColumn
                 {
                     Type = varcharType,
                     Count = names.Length,
-                    Values = names,
+                    Values = nameBytes,
                 },
             ],
             RowCount = ids.Length,

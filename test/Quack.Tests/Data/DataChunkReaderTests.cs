@@ -130,8 +130,12 @@ public class DataChunkReaderTests
 
         DuckDbChunk chunk = DataChunkReader.Read(new BinaryDeserializer(bytes));
 
-        StringColumn col = Assert.IsType<StringColumn>(chunk.Columns[0]);
-        Assert.Equal(values, col.Values);
+        VarBytesColumn col = Assert.IsType<VarBytesColumn>(chunk.Columns[0]);
+        Assert.Equal(values.Length, col.Values.Length);
+        for (int i = 0; i < values.Length; i++)
+        {
+            Assert.Equal(System.Text.Encoding.UTF8.GetBytes(values[i]), col.Values[i]!.Value.ToArray());
+        }
     }
 
     [Fact]
@@ -229,8 +233,9 @@ public class DataChunkReaderTests
         FixedSizeColumn ints = Assert.IsType<FixedSizeColumn>(col.Fields[0]);
         Assert.Equal(7, BinaryPrimitives.ReadInt32LittleEndian(ints.GetBytes(0)));
         Assert.Equal(8, BinaryPrimitives.ReadInt32LittleEndian(ints.GetBytes(1)));
-        StringColumn strs = Assert.IsType<StringColumn>(col.Fields[1]);
-        Assert.Equal(new[] { "x", "y" }, strs.Values);
+        VarBytesColumn strs = Assert.IsType<VarBytesColumn>(col.Fields[1]);
+        Assert.Equal("x"u8.ToArray(), strs.Values[0]!.Value.ToArray());
+        Assert.Equal("y"u8.ToArray(), strs.Values[1]!.Value.ToArray());
     }
 
     private enum VectorTypeOnWire : byte

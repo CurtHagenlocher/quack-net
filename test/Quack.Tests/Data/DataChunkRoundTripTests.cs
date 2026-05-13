@@ -64,22 +64,22 @@ public class DataChunkRoundTripTests
         mask[0] = 0b0000_0101;
         DuckDbChunk original = ChunkBuilder.OneColumn(
             new LogicalType(LogicalTypeId.Varchar),
-            new StringColumn
+            new VarBytesColumn
             {
                 Type = new LogicalType(LogicalTypeId.Varchar),
                 Count = 3,
-                Values = ["alpha", null, "gamma"],
+                Values = [(ReadOnlyMemory<byte>)"alpha"u8.ToArray(), null, (ReadOnlyMemory<byte>)"gamma"u8.ToArray()],
                 Validity = new ValidityMask(mask),
             });
 
         DuckDbChunk round = RoundTrip(original);
 
-        StringColumn col = Assert.IsType<StringColumn>(round.Columns[0]);
+        VarBytesColumn col = Assert.IsType<VarBytesColumn>(round.Columns[0]);
         Assert.False(col.IsNull(0));
         Assert.True(col.IsNull(1));
         Assert.False(col.IsNull(2));
-        Assert.Equal("alpha", col.Values[0]);
-        Assert.Equal("gamma", col.Values[2]);
+        Assert.Equal("alpha"u8.ToArray(), col.Values[0]!.Value.ToArray());
+        Assert.Equal("gamma"u8.ToArray(), col.Values[2]!.Value.ToArray());
     }
 
     [Fact]
@@ -141,11 +141,11 @@ public class DataChunkRoundTripTests
                         ElementSize = 4,
                         Data = ChunkBuilder.Int32Bytes(7, 8),
                     },
-                    new StringColumn
+                    new VarBytesColumn
                     {
                         Type = new LogicalType(LogicalTypeId.Varchar),
                         Count = 2,
-                        Values = ["x", "y"],
+                        Values = [(ReadOnlyMemory<byte>)"x"u8.ToArray(), (ReadOnlyMemory<byte>)"y"u8.ToArray()],
                     },
                 ],
             });
@@ -161,8 +161,9 @@ public class DataChunkRoundTripTests
         FixedSizeColumn ints = Assert.IsType<FixedSizeColumn>(col.Fields[0]);
         Assert.Equal(7, BinaryPrimitives.ReadInt32LittleEndian(ints.GetBytes(0)));
         Assert.Equal(8, BinaryPrimitives.ReadInt32LittleEndian(ints.GetBytes(1)));
-        StringColumn strs = Assert.IsType<StringColumn>(col.Fields[1]);
-        Assert.Equal(new[] { "x", "y" }, strs.Values);
+        VarBytesColumn strs = Assert.IsType<VarBytesColumn>(col.Fields[1]);
+        Assert.Equal("x"u8.ToArray(), strs.Values[0]!.Value.ToArray());
+        Assert.Equal("y"u8.ToArray(), strs.Values[1]!.Value.ToArray());
     }
 
     [Fact]
@@ -176,7 +177,7 @@ public class DataChunkRoundTripTests
             Columns =
             [
                 new FixedSizeColumn { Type = intType, Count = 2, ElementSize = 4, Data = ChunkBuilder.Int32Bytes(100, 200) },
-                new StringColumn { Type = varcharType, Count = 2, Values = ["foo", "bar"] },
+                new VarBytesColumn { Type = varcharType, Count = 2, Values = [(ReadOnlyMemory<byte>)"foo"u8.ToArray(), (ReadOnlyMemory<byte>)"bar"u8.ToArray()] },
             ],
             RowCount = 2,
         };
