@@ -20,6 +20,18 @@ public abstract class ExtraTypeInfo : IEquatable<ExtraTypeInfo>
 
     internal abstract ExtraTypeInfoKind Kind { get; }
 
+    internal void Serialize(BinarySerializer s)
+    {
+        s.WriteProperty(fieldId: 100, (byte)Kind);
+        s.WritePropertyWithDefault(fieldId: 101, Alias);
+        // field 102 was deleted from the schema; never emit
+        // field 103 (extension_info) is not yet supported as a write path,
+        // so we always omit it (treated as null)
+        SerializeFields(s);
+    }
+
+    internal abstract void SerializeFields(BinarySerializer s);
+
     internal static ExtraTypeInfo? Deserialize(BinaryDeserializer reader)
     {
         reader.BeginProperty(fieldId: 100);
@@ -81,6 +93,7 @@ public abstract class ExtraTypeInfo : IEquatable<ExtraTypeInfo>
 public sealed class GenericTypeInfo : ExtraTypeInfo
 {
     internal override ExtraTypeInfoKind Kind => ExtraTypeInfoKind.Generic;
+    internal override void SerializeFields(BinarySerializer s) { }
     protected override bool EqualsCore(ExtraTypeInfo other) => true;
     public override string ToString() => "Generic";
 }
@@ -91,6 +104,12 @@ public sealed class DecimalTypeInfo : ExtraTypeInfo
     public byte Scale { get; init; }
 
     internal override ExtraTypeInfoKind Kind => ExtraTypeInfoKind.Decimal;
+
+    internal override void SerializeFields(BinarySerializer s)
+    {
+        s.WritePropertyWithDefault(fieldId: 200, Width);
+        s.WritePropertyWithDefault(fieldId: 201, Scale);
+    }
 
     internal static DecimalTypeInfo ReadFields(BinaryDeserializer reader)
     {
@@ -114,6 +133,11 @@ public sealed class StringTypeInfo : ExtraTypeInfo
 
     internal override ExtraTypeInfoKind Kind => ExtraTypeInfoKind.String;
 
+    internal override void SerializeFields(BinarySerializer s)
+    {
+        s.WritePropertyWithDefault(fieldId: 200, Collation);
+    }
+
     internal static StringTypeInfo ReadFields(BinaryDeserializer reader)
     {
         string collation = string.Empty;
@@ -133,6 +157,16 @@ public sealed class ListTypeInfo : ExtraTypeInfo
     public required LogicalType ChildType { get; init; }
 
     internal override ExtraTypeInfoKind Kind => ExtraTypeInfoKind.List;
+
+    internal override void SerializeFields(BinarySerializer s)
+    {
+        // field 200 child_type is WriteProperty<LogicalType>(...) which wraps
+        // the value in an object via WriteValue<T-has-Serialize>.
+        s.WriteFieldId(200);
+        s.BeginObject();
+        ChildType.Serialize(s);
+        s.EndObject();
+    }
 
     internal static ListTypeInfo ReadFields(BinaryDeserializer reader)
     {
@@ -154,6 +188,15 @@ public sealed class ArrayTypeInfo : ExtraTypeInfo
     public uint Size { get; init; }
 
     internal override ExtraTypeInfoKind Kind => ExtraTypeInfoKind.Array;
+
+    internal override void SerializeFields(BinarySerializer s)
+    {
+        s.WriteFieldId(200);
+        s.BeginObject();
+        ChildType.Serialize(s);
+        s.EndObject();
+        s.WritePropertyWithDefault(fieldId: 201, Size);
+    }
 
     internal static ArrayTypeInfo ReadFields(BinaryDeserializer reader)
     {
@@ -177,6 +220,26 @@ public sealed class StructTypeInfo : ExtraTypeInfo
 
     internal override ExtraTypeInfoKind Kind => ExtraTypeInfoKind.Struct;
 
+    internal override void SerializeFields(BinarySerializer s)
+    {
+        if (ChildTypes.Count == 0) return; // default-omit empty list
+        s.WriteFieldId(200);
+        s.BeginList((ulong)ChildTypes.Count);
+        foreach (KeyValuePair<string, LogicalType> child in ChildTypes)
+        {
+            // Each element is a std::pair<string, LogicalType> serialized by
+            // the pair template: field 0 = "first", field 1 = "second".
+            s.BeginObject();
+            s.WriteProperty(fieldId: 0, child.Key);
+            s.WriteFieldId(1);
+            s.BeginObject();
+            child.Value.Serialize(s);
+            s.EndObject();
+            s.EndObject();
+        }
+        s.EndList();
+    }
+
     internal static StructTypeInfo ReadFields(BinaryDeserializer reader)
     {
         List<KeyValuePair<string, LogicalType>> children = [];
@@ -185,13 +248,12 @@ public sealed class StructTypeInfo : ExtraTypeInfo
             ulong count = reader.BeginList();
             for (ulong i = 0; i < count; i++)
             {
-                // Each element is an object with field 100 = "first" (string),
-                // field 101 = "second" (LogicalType). Pair serialization in
-                // duckdb writes this layout via the std::pair template.
+                // Each element is a std::pair<string, LogicalType>: field 0 +
+                // field 1 (per the WriteValue<std::pair> template).
                 reader.BeginObject();
-                reader.BeginProperty(fieldId: 100);
+                reader.BeginProperty(fieldId: 0);
                 string name = reader.ReadString();
-                reader.BeginProperty(fieldId: 101);
+                reader.BeginProperty(fieldId: 1);
                 LogicalType childType = LogicalType.Deserialize(reader);
                 reader.EndObject();
                 children.Add(new KeyValuePair<string, LogicalType>(name, childType));
@@ -237,6 +299,20 @@ public sealed class EnumTypeInfo : ExtraTypeInfo
     public PhysicalType PhysicalType { get; init; }
 
     internal override ExtraTypeInfoKind Kind => ExtraTypeInfoKind.Enum;
+
+    internal override void SerializeFields(BinarySerializer s)
+    {
+        // EnumTypeInfo::Serialize writes field 200 (idx_t values_count) and
+        // field 201 (list<string> values).
+        s.WriteProperty(fieldId: 200, (ulong)Values.Count);
+        s.WriteFieldId(201);
+        s.BeginList((ulong)Values.Count);
+        foreach (string v in Values)
+        {
+            s.WriteString(v);
+        }
+        s.EndList();
+    }
 
     internal static EnumTypeInfo ReadFields(BinaryDeserializer reader)
     {
@@ -302,6 +378,11 @@ public sealed class TemplateTypeInfo : ExtraTypeInfo
     public string Name { get; init; } = string.Empty;
 
     internal override ExtraTypeInfoKind Kind => ExtraTypeInfoKind.Template;
+
+    internal override void SerializeFields(BinarySerializer s)
+    {
+        s.WritePropertyWithDefault(fieldId: 200, Name);
+    }
 
     internal static TemplateTypeInfo ReadFields(BinaryDeserializer reader)
     {

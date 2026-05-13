@@ -105,6 +105,21 @@ public sealed class LogicalType : IEquatable<LogicalType>
         return new LogicalType(id, typeInfo);
     }
 
+    internal void Serialize(BinarySerializer s)
+    {
+        s.WriteProperty(fieldId: 100, (byte)Id);
+        if (TypeInfo is not null)
+        {
+            // field 101 type_info: WritePropertyWithDefault<shared_ptr<T>> with
+            // a non-null value writes the field id followed by the value wrapped
+            // in an object (via WriteValue<T-has-Serialize>).
+            s.WriteFieldId(101);
+            s.BeginObject();
+            TypeInfo.Serialize(s);
+            s.EndObject();
+        }
+    }
+
     public override string ToString()
     {
         if (TypeInfo is null) return Id.ToString();

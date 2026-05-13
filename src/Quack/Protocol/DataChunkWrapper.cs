@@ -30,4 +30,22 @@ internal static class DataChunkWrapper
         d.EndNullable();
         return chunk;
     }
+
+    public static void WriteChunk(BinarySerializer s, DuckDbChunk? chunk)
+    {
+        s.BeginNullable(chunk is not null);
+        if (chunk is null)
+        {
+            s.EndNullable();
+            return;
+        }
+        // Outer object from WriteValue<T-has-Serialize> wrapping.
+        s.BeginObject();
+        // field 300 "chunk" — DataChunkWrapper::Serialize uses WriteObject(300, ...)
+        // which writes field id + BeginObject + DataChunk.Serialize + EndObject.
+        s.WriteFieldId(300);
+        DataChunkWriter.Write(s, chunk);
+        s.EndObject();
+        s.EndNullable();
+    }
 }

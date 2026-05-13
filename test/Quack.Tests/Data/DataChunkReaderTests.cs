@@ -300,9 +300,11 @@ public class DataChunkReaderTests
                 s.BeginList((ulong)strct.ChildTypes.Count);
                 foreach (KeyValuePair<string, LogicalType> child in strct.ChildTypes)
                 {
+                    // pair<string, LogicalType> uses field 0 and 1 per
+                    // WriteValue<std::pair> in the C++ Serializer.
                     s.BeginObject();
-                    s.WriteProperty(fieldId: 100, child.Key);
-                    s.WriteFieldId(101);
+                    s.WriteProperty(fieldId: 0, child.Key);
+                    s.WriteFieldId(1);
                     WriteLogicalType(s, child.Value);
                     s.EndObject();
                 }

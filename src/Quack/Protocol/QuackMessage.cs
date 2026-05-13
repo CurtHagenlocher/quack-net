@@ -62,6 +62,7 @@ public abstract record QuackMessage
             ConnectionRequestMessage cq => cq with { ConnectionId = header.ConnectionId, ClientQueryId = header.ClientQueryId },
             PrepareRequestMessage pq => pq with { ConnectionId = header.ConnectionId, ClientQueryId = header.ClientQueryId },
             FetchRequestMessage fq => fq with { ConnectionId = header.ConnectionId, ClientQueryId = header.ClientQueryId },
+            AppendRequestMessage aq => aq with { ConnectionId = header.ConnectionId, ClientQueryId = header.ClientQueryId },
             DisconnectMessage dm => dm with { ConnectionId = header.ConnectionId, ClientQueryId = header.ClientQueryId },
             _ => body,
         };
@@ -75,6 +76,7 @@ public abstract record QuackMessage
         MessageType.PrepareResponse => PrepareResponseMessage.DeserializeBody(d),
         MessageType.FetchRequest => FetchRequestMessage.DeserializeBody(d),
         MessageType.FetchResponse => FetchResponseMessage.DeserializeBody(d),
+        MessageType.AppendRequest => AppendRequestMessage.DeserializeBody(d),
         MessageType.SuccessResponse => SuccessResponse.DeserializeBody(d),
         MessageType.DisconnectMessage => DisconnectMessage.DeserializeBody(d),
         MessageType.ErrorResponse => ErrorResponse.DeserializeBody(d),

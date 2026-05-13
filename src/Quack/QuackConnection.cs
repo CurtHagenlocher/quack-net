@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
+using Quack.Data;
 using Quack.Protocol;
 using Quack.Transport;
 
@@ -101,6 +102,31 @@ public sealed class QuackConnection : IAsyncDisposable
             firstBatch: response.Results,
             needsMoreFetch: response.NeedsMoreFetch,
             resultUuid: response.ResultUuid);
+    }
+
+    public Task AppendAsync(string tableName, DuckDbChunk chunk, CancellationToken cancellationToken = default)
+        => AppendAsync(schemaName: string.Empty, tableName: tableName, chunk: chunk, cancellationToken: cancellationToken);
+
+    public async Task AppendAsync(string schemaName, string tableName, DuckDbChunk chunk, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(schemaName);
+        ArgumentException.ThrowIfNullOrEmpty(tableName);
+        ArgumentNullException.ThrowIfNull(chunk);
+
+        AppendRequestMessage request = new()
+        {
+            ConnectionId = ConnectionId,
+            SchemaName = schemaName,
+            TableName = tableName,
+            AppendChunk = chunk,
+        };
+
+        // Server replies with SuccessResponse on success. ErrorResponse is
+        // turned into a QuackException by the transport.
+        _ = await _transport
+            .SendAsync<SuccessResponse>(request, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async ValueTask DisposeAsync()

@@ -90,14 +90,14 @@ public class LogicalTypeTests
             info.BeginList(2);
             // Pair 1: ("a", INTEGER)
             info.BeginObject();
-            info.WriteProperty(fieldId: 100, "a");
-            info.WriteFieldId(101);
+            info.WriteProperty(fieldId: 0, "a");
+            info.WriteFieldId(1);
             WriteInnerLogicalType(info, LogicalTypeId.Integer);
             info.EndObject();
             // Pair 2: ("b", VARCHAR)
             info.BeginObject();
-            info.WriteProperty(fieldId: 100, "b");
-            info.WriteFieldId(101);
+            info.WriteProperty(fieldId: 0, "b");
+            info.WriteFieldId(1);
             WriteInnerLogicalType(info, LogicalTypeId.Varchar);
             info.EndObject();
             info.EndList();
