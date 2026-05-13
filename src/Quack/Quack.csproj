@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Quack</RootNamespace>
+    <AssemblyName>Quack</AssemblyName>
+    <Description>A pure-managed .NET client for DuckDB's quack remote protocol.</Description>
+    <PackageId>Quack</PackageId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Quack.Tests" />
+    <InternalsVisibleTo Include="Quack.IntegrationTests" />
+  </ItemGroup>
+
+</Project>
