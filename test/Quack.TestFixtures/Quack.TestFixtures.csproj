@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Quack.TestFixtures</RootNamespace>
+    <AssemblyName>Quack.TestFixtures</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!-- IAsyncLifetime lives in xunit.core; we pull that in directly rather
+       than the umbrella `xunit` meta-package so this helpers project doesn't
+       drag in the test runner / Microsoft.NET.Test.Sdk machinery. -->
+  <ItemGroup>
+    <PackageReference Include="xunit.core" Version="2.9.3" />
+  </ItemGroup>
+
+</Project>

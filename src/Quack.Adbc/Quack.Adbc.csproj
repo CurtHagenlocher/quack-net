@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Quack.Adbc</RootNamespace>
+    <AssemblyName>Quack.Adbc</AssemblyName>
+    <Description>An Apache Arrow ADBC driver for DuckDB's quack remote protocol, built on top of Quack.</Description>
+    <PackageId>Quack.Adbc</PackageId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Apache.Arrow" Version="23.0.0" />
+    <PackageReference Include="Apache.Arrow.Adbc" Version="0.23.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Quack\Quack.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Quack.Adbc.Tests" />
+  </ItemGroup>
+
+</Project>

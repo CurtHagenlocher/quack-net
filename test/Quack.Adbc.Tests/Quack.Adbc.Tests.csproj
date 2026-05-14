@@ -3,7 +3,7 @@
   <PropertyGroup>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
-    <RootNamespace>Quack.IntegrationTests</RootNamespace>
+    <RootNamespace>Quack.Adbc.Tests</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
@@ -14,7 +14,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Quack\Quack.csproj" />
+    <ProjectReference Include="..\..\src\Quack.Adbc\Quack.Adbc.csproj" />
     <ProjectReference Include="..\Quack.TestFixtures\Quack.TestFixtures.csproj" />
   </ItemGroup>
 

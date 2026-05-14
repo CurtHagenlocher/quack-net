@@ -2,13 +2,16 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using Xunit;
 
-namespace Quack.IntegrationTests;
+namespace Quack.TestFixtures;
 
 // Spawns a DuckDB CLI in interactive mode, loads the quack extension, and
 // starts a `quack_serve` listener on a random loopback port. The process is
 // kept alive for the lifetime of the fixture; DisposeAsync sends `quack_stop`
-// and `.exit` to shut things down cleanly.
+// and `.exit` to shut things down cleanly. Shared between Quack.IntegrationTests
+// and Quack.Adbc.Tests so we don't pay the duckdb startup cost twice or risk
+// the two fixtures drifting in setup details.
 public sealed class QuackServerFixture : IAsyncLifetime
 {
     public const string DefaultDuckDbExePath = @"C:\src\duckdb\duckdb.exe";

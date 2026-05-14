@@ -1,9 +1,12 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/Quack.Adbc/Quack.Adbc.csproj" />
     <Project Path="src/Quack/Quack.csproj" />
   </Folder>
   <Folder Name="/test/">
+    <Project Path="test/Quack.TestFixtures/Quack.TestFixtures.csproj" />
     <Project Path="test/Quack.Tests/Quack.Tests.csproj" />
+    <Project Path="test/Quack.Adbc.Tests/Quack.Adbc.Tests.csproj" />
     <Project Path="test/Quack.IntegrationTests/Quack.IntegrationTests.csproj" />
   </Folder>
   <Folder Name="/build/">
