@@ -1,3 +1,4 @@
+using Apache.Arrow;
 using Apache.Arrow.Adbc;
 using Quack.Data;
 
@@ -6,6 +7,7 @@ namespace Quack.Adbc;
 internal sealed class QuackAdbcStatement : AdbcStatement
 {
     private readonly QuackAdbcConnection _connection;
+    private RecordBatch? _boundBatch;
     private bool _disposed;
 
     public QuackAdbcStatement(QuackAdbcConnection connection)
@@ -13,9 +15,25 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         _connection = connection;
     }
 
+    public override void Bind(RecordBatch batch, Schema schema)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(batch);
+        // The schema is provided by callers for parameterized prepared
+        // statements; we don't support those, so we just keep the batch.
+        // The batch carries its own schema for the ingest path.
+        _boundBatch?.Dispose();
+        _boundBatch = batch;
+    }
+
     public override QueryResult ExecuteQuery()
     {
         ThrowIfDisposed();
+        if (_boundBatch is not null)
+        {
+            throw new InvalidOperationException(
+                "ExecuteQuery cannot be used with a bound RecordBatch; use ExecuteUpdate to ingest rows.");
+        }
         if (string.IsNullOrEmpty(SqlQuery))
         {
             throw new InvalidOperationException("SqlQuery must be set before calling ExecuteQuery.");
@@ -25,20 +43,40 @@ internal sealed class QuackAdbcStatement : AdbcStatement
             .ExecuteAsync(SqlQuery)
             .GetAwaiter()
             .GetResult();
-        // ADBC convention: -1 means "row count unknown" (true for SELECT here).
         return new QueryResult(-1, new QuackArrowArrayStream(result));
     }
 
     public override UpdateResult ExecuteUpdate()
     {
         ThrowIfDisposed();
+        // Bound-batch path: append the batch's rows to the table named by
+        // SqlQuery. ADBC's contract for ingest via Bind+ExecuteUpdate uses
+        // SqlQuery as the target table identifier.
+        if (_boundBatch is not null)
+        {
+            if (string.IsNullOrEmpty(SqlQuery))
+            {
+                throw new InvalidOperationException(
+                    "SqlQuery (target table name) must be set when a RecordBatch is bound.");
+            }
+            DuckDbChunk chunk = RecordBatchConverter.ToDuckDbChunk(_boundBatch);
+            _connection.Underlying
+                .AppendAsync(SqlQuery, chunk)
+                .GetAwaiter()
+                .GetResult();
+            long appended = _boundBatch.Length;
+            _boundBatch.Dispose();
+            _boundBatch = null;
+            return new UpdateResult(appended);
+        }
+
         if (string.IsNullOrEmpty(SqlQuery))
         {
             throw new InvalidOperationException("SqlQuery must be set before calling ExecuteUpdate.");
         }
 
-        // Drain the result (CREATE/INSERT/UPDATE/DELETE produce a no-row
-        // result that must still be consumed for the server to advance).
+        // SQL-only path: execute and drain. quack doesn't return an affected-
+        // row count, so we report -1 unless rows came back.
         QuackQueryResult result = _connection.Underlying
             .ExecuteAsync(SqlQuery)
             .GetAwaiter()
@@ -48,8 +86,6 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         {
             total += chunk.RowCount;
         }
-        // The quack protocol doesn't surface affected-row counts back from
-        // INSERT/UPDATE/DELETE; -1 is ADBC's "unknown" sentinel.
         return new UpdateResult(total == 0 ? -1 : total);
     }
 
@@ -58,6 +94,8 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         if (!_disposed)
         {
             _disposed = true;
+            _boundBatch?.Dispose();
+            _boundBatch = null;
         }
         base.Dispose();
     }
