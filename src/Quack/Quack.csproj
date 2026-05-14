@@ -10,6 +10,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Quack.Tests" />
     <InternalsVisibleTo Include="Quack.IntegrationTests" />
+    <InternalsVisibleTo Include="Quack.Adbc" />
   </ItemGroup>
 
 </Project>
