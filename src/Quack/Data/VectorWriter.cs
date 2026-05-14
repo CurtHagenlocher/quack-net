@@ -16,6 +16,15 @@ internal static class VectorWriter
                 $"Column count ({column.Count}) does not match the chunk row count ({count}).", nameof(column));
         }
 
+        // GEOMETRY carries an optional `geometry_format` byte at field 99 that
+        // tells the server whether the column payload is plain WKB (1) or
+        // duckdb's native double-aligned SPATIAL format (0). If we omit it
+        // the server defaults to SPATIAL and mis-parses our WKB bytes.
+        if (column.Type.Id == LogicalTypeId.Geometry)
+        {
+            s.WriteProperty(fieldId: 99, (byte)GeometryStorageType.Wkb);
+        }
+
         bool hasValidity = !column.Validity.IsAllValid;
         s.WriteProperty(fieldId: 100, hasValidity);
         if (hasValidity)

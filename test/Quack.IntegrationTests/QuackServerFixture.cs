@@ -66,6 +66,10 @@ public sealed class QuackServerFixture : IAsyncLifetime
         await input.WriteLineAsync(".bail on").ConfigureAwait(false);
         await input.WriteLineAsync("INSTALL quack FROM core_nightly;").ConfigureAwait(false);
         await input.WriteLineAsync("LOAD quack;").ConfigureAwait(false);
+        // spatial is preinstalled by the user; LOAD is enough. Best-effort
+        // INSTALL keeps the fixture usable on machines where it's absent.
+        await input.WriteLineAsync("INSTALL spatial;").ConfigureAwait(false);
+        await input.WriteLineAsync("LOAD spatial;").ConfigureAwait(false);
         await input.WriteLineAsync($"CALL quack_serve('{QuackUri}', token => '{Token}');").ConfigureAwait(false);
         await input.FlushAsync().ConfigureAwait(false);
 
