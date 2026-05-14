@@ -25,7 +25,10 @@ internal sealed class QuackAdbcConnection : AdbcConnection
     }
 
     public override IArrowArrayStream GetInfo(IReadOnlyList<AdbcInfoCode> codes)
-        => throw AdbcException.NotImplemented("GetInfo is not yet implemented for quack-net.");
+    {
+        ThrowIfDisposed();
+        return GetInfoBuilder.Build(this, codes);
+    }
 
     public override IArrowArrayStream GetObjects(
         GetObjectsDepth depth,

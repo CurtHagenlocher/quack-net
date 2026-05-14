@@ -47,6 +47,66 @@ public class MetadataTests : IClassFixture<QuackServerFixture>
     }
 
     [Fact]
+    public async Task GetInfo_ReturnsVendorAndDriverMetadata()
+    {
+        using AdbcConnection conn = OpenConnection();
+
+        AdbcInfoCode[] requested =
+        {
+            AdbcInfoCode.VendorName,
+            AdbcInfoCode.VendorVersion,
+            AdbcInfoCode.VendorSql,
+            AdbcInfoCode.VendorSubstrait,
+            AdbcInfoCode.DriverName,
+            AdbcInfoCode.DriverArrowVersion,
+        };
+        using IArrowArrayStream stream = conn.GetInfo(requested);
+
+        // Schema: info_name uint32 not-null, info_value dense_union<...>.
+        Assert.Equal("info_name", stream.Schema.FieldsList[0].Name);
+        Assert.IsType<UInt32Type>(stream.Schema.FieldsList[0].DataType);
+        Assert.Equal("info_value", stream.Schema.FieldsList[1].Name);
+        UnionType union = Assert.IsType<UnionType>(stream.Schema.FieldsList[1].DataType);
+        Assert.Equal(UnionMode.Dense, union.Mode);
+        Assert.Equal(6, union.Fields.Count);
+        Assert.IsType<StringType>(union.Fields[0].DataType);
+        Assert.IsType<BooleanType>(union.Fields[1].DataType);
+
+        RecordBatch? batch = await stream.ReadNextRecordBatchAsync();
+        Assert.NotNull(batch);
+        Assert.Equal(requested.Length, batch.Length);
+
+        UInt32Array names = Assert.IsType<UInt32Array>(batch.Column(0));
+        DenseUnionArray values = Assert.IsType<DenseUnionArray>(batch.Column(1));
+        StringArray strs = Assert.IsType<StringArray>(values.Fields[0]);
+        BooleanArray bools = Assert.IsType<BooleanArray>(values.Fields[1]);
+
+        // Walk the batch and reify (code -> value) by following the dense union.
+        Dictionary<AdbcInfoCode, object?> got = new();
+        for (int row = 0; row < batch.Length; row++)
+        {
+            AdbcInfoCode code = (AdbcInfoCode)names.GetValue(row)!.Value;
+            byte typeId = values.TypeIds[row];
+            int offset = values.ValueOffsets[row];
+            got[code] = typeId switch
+            {
+                0 => strs.GetString(offset),
+                1 => bools.GetValue(offset),
+                _ => $"unexpected type_id {typeId}",
+            };
+        }
+
+        Assert.Equal("DuckDB", got[AdbcInfoCode.VendorName]);
+        Assert.False(string.IsNullOrEmpty((string?)got[AdbcInfoCode.VendorVersion]));
+        Assert.Equal(true, got[AdbcInfoCode.VendorSql]);
+        Assert.Equal(false, got[AdbcInfoCode.VendorSubstrait]);
+        Assert.Equal("quack-net ADBC", got[AdbcInfoCode.DriverName]);
+        Assert.False(string.IsNullOrEmpty((string?)got[AdbcInfoCode.DriverArrowVersion]));
+
+        Assert.Null(await stream.ReadNextRecordBatchAsync());
+    }
+
+    [Fact]
     public async Task GetTableTypes_ReturnsBaseTableAndView()
     {
         using AdbcConnection conn = OpenConnection();
