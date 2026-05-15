@@ -61,20 +61,24 @@ $project  = Join-Path $repoRoot 'src/Quack.Adbc.Native/Quack.Adbc.Native.csproj'
 dotnet publish $project -c $Configuration -r $Runtime
 if ($LASTEXITCODE -ne 0) { throw "Publish failed (exit $LASTEXITCODE)." }
 
-# AssemblyName=quack_adbc, so the AOT output is platform-suffixed:
+# Native AOT shared libraries take the AssemblyName directly with the
+# platform-appropriate extension (NO `lib` prefix on Linux/macOS — that's
+# a linker convention, not an AOT one):
 #   Windows -> quack_adbc.dll
-#   Linux   -> libquack_adbc.so
-#   macOS   -> libquack_adbc.dylib
+#   Linux   -> quack_adbc.so
+#   macOS   -> quack_adbc.dylib
 $publishDir = Join-Path $repoRoot "src/Quack.Adbc.Native/bin/$Configuration/net10.0/$Runtime/publish"
 if ($Runtime -like 'win-*') {
     $libName = 'quack_adbc.dll'
 } elseif ($Runtime -like 'osx-*') {
-    $libName = 'libquack_adbc.dylib'
+    $libName = 'quack_adbc.dylib'
 } else {
-    $libName = 'libquack_adbc.so'
+    $libName = 'quack_adbc.so'
 }
 $libPath = Join-Path $publishDir $libName
 if (-not (Test-Path $libPath)) {
+    Write-Host "Contents of $publishDir":
+    Get-ChildItem $publishDir | ForEach-Object { Write-Host "  $($_.Name)" }
     throw "Expected output not found: $libPath"
 }
 

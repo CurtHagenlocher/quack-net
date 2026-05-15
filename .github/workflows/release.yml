@@ -27,23 +27,18 @@ jobs:
           - os: windows-latest
             rid: win-x64
             lib: quack_adbc.dll
-            asset_prefix: quack_adbc
           - os: ubuntu-latest
             rid: linux-x64
-            lib: libquack_adbc.so
-            asset_prefix: libquack_adbc
+            lib: quack_adbc.so
           - os: ubuntu-24.04-arm
             rid: linux-arm64
-            lib: libquack_adbc.so
-            asset_prefix: libquack_adbc
+            lib: quack_adbc.so
           - os: macos-13
             rid: osx-x64
-            lib: libquack_adbc.dylib
-            asset_prefix: libquack_adbc
+            lib: quack_adbc.dylib
           - os: macos-latest
             rid: osx-arm64
-            lib: libquack_adbc.dylib
-            asset_prefix: libquack_adbc
+            lib: quack_adbc.dylib
 
     steps:
       - uses: actions/checkout@v4
@@ -87,10 +82,10 @@ jobs:
           $version = '${{ steps.derive-version.outputs.version }}'
           $rid     = '${{ matrix.rid }}'
           $lib     = '${{ matrix.lib }}'
-          $prefix  = '${{ matrix.asset_prefix }}'
           $src     = "src/Quack.Adbc.Native/bin/Release/net10.0/$rid/publish/$lib"
+          $stem    = [System.IO.Path]::GetFileNameWithoutExtension($lib)
           $ext     = [System.IO.Path]::GetExtension($lib)
-          $assetName = "$prefix-$version-$rid$ext"
+          $assetName = "$stem-$version-$rid$ext"
           New-Item -ItemType Directory -Force artifacts | Out-Null
           $dst = Join-Path 'artifacts' $assetName
           Copy-Item $src $dst

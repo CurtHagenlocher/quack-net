@@ -74,10 +74,10 @@ Each release publishes a self-contained native library per platform:
 | Platform | Asset |
 | --- | --- |
 | Windows x64 | `quack_adbc-<version>-win-x64.dll` |
-| Linux x64   | `libquack_adbc-<version>-linux-x64.so` |
-| Linux arm64 | `libquack_adbc-<version>-linux-arm64.so` |
-| macOS x64   | `libquack_adbc-<version>-osx-x64.dylib` |
-| macOS arm64 | `libquack_adbc-<version>-osx-arm64.dylib` |
+| Linux x64   | `quack_adbc-<version>-linux-x64.so` |
+| Linux arm64 | `quack_adbc-<version>-linux-arm64.so` |
+| macOS x64   | `quack_adbc-<version>-osx-x64.dylib` |
+| macOS arm64 | `quack_adbc-<version>-osx-arm64.dylib` |
 
 Download the right one, install `adbc-driver-manager`, and load it:
 
