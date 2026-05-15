@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to attach the release to (e.g. v0.1.0). Must already exist.'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build win-x64 native DLL
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.derive-version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Derive version from tag
+        id: derive-version
+        shell: pwsh
+        run: |
+          $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
+          # Strip leading 'v' to get a SemVer string.
+          $version = $tag -replace '^v', ''
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Tag: $tag  Version: $version"
+
+      - name: Restore
+        run: dotnet restore quack-net.slnx
+
+      - name: Build (managed)
+        run: dotnet build quack-net.slnx -c Release --no-restore -p:Version=${{ steps.derive-version.outputs.version }}
+
+      - name: Unit tests
+        run: dotnet test test/Quack.Tests/Quack.Tests.csproj -c Release --no-build --verbosity normal
+
+      - name: Publish Native AOT
+        shell: pwsh
+        run: |
+          pwsh scripts/publish-native.ps1 -Runtime win-x64 -Configuration Release
+          # Stage a versioned artifact name for the release asset.
+          $src = "src/Quack.Adbc.Native/bin/Release/net10.0/win-x64/publish/quack_adbc.dll"
+          $out = "artifacts/quack_adbc-${{ steps.derive-version.outputs.version }}-win-x64.dll"
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Copy-Item $src $out
+          Get-FileHash $out -Algorithm SHA256 | ForEach-Object {
+            "$($_.Hash)  $(Split-Path $out -Leaf)" | Out-File "$out.sha256" -Encoding ascii
+          }
+          Get-ChildItem artifacts
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quack_adbc-win-x64
+          path: artifacts/
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: build-windows
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: dist/*
+          fail_on_unmatched_files: true

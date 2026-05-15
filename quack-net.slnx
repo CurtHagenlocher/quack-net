@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/Quack.Adbc/Quack.Adbc.csproj" />
+    <Project Path="src/Quack.Adbc.Native/Quack.Adbc.Native.csproj" />
     <Project Path="src/Quack/Quack.csproj" />
   </Folder>
   <Folder Name="/test/">
