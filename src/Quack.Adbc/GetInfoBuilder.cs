@@ -58,7 +58,11 @@ internal static class GetInfoBuilder
     {
         Dictionary<AdbcInfoCode, object> all = BuildValues(connection);
 
-        IEnumerable<AdbcInfoCode> requested = codes is null
+        // The C ADBC contract says "info_codes_length == 0 means return all
+        // codes." The C# binding's CAdbcDriverExporter loses the null
+        // distinction (always allocates an array) so we treat empty the same
+        // as null here.
+        IEnumerable<AdbcInfoCode> requested = (codes is null || codes.Count == 0)
             ? all.Keys
             : codes.Where(all.ContainsKey);
 

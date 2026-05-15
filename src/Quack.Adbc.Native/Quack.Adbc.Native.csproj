@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Quack.Adbc.Native</RootNamespace>
+    <AssemblyName>quack_adbc</AssemblyName>
+    <Description>Native AOT ADBC driver shim for Quack — produces a self-contained DLL with a QuackAdbcDriverInit entrypoint, loadable from Python via adbc_driver_manager.</Description>
+
+    <!-- Native AOT settings -->
+    <PublishAot>true</PublishAot>
+    <IsAotCompatible>true</IsAotCompatible>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- Trim warnings from Apache.Arrow / Apache.Arrow.Adbc transitive deps are
+         out of our control; turn them from errors back into warnings here so
+         the build can proceed. The AOT analyzers still flag issues in our own
+         code, which we triage. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Quack.Adbc\Quack.Adbc.csproj" />
+  </ItemGroup>
+
+</Project>
