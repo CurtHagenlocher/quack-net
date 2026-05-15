@@ -67,15 +67,25 @@ QueryResult qr = stmt.ExecuteQuery();
 RecordBatch? batch = await qr.Stream!.ReadNextRecordBatchAsync();
 ```
 
-## Using the native DLL from Python
+## Using the native library from Python (or any ADBC C-API consumer)
 
-Download `quack_adbc.dll` from a release, install `adbc-driver-manager`, and:
+Each release publishes a self-contained native library per platform:
+
+| Platform | Asset |
+| --- | --- |
+| Windows x64 | `quack_adbc-<version>-win-x64.dll` |
+| Linux x64   | `libquack_adbc-<version>-linux-x64.so` |
+| Linux arm64 | `libquack_adbc-<version>-linux-arm64.so` |
+| macOS x64   | `libquack_adbc-<version>-osx-x64.dylib` |
+| macOS arm64 | `libquack_adbc-<version>-osx-arm64.dylib` |
+
+Download the right one, install `adbc-driver-manager`, and load it:
 
 ```python
 import adbc_driver_manager.dbapi
 
 with adbc_driver_manager.dbapi.connect(
-    driver="path/to/quack_adbc.dll",
+    driver="path/to/quack_adbc.so",   # or .dll / .dylib
     entrypoint="QuackAdbcDriverInit",
     db_kwargs={
         "uri":   "quack:127.0.0.1:9494",
@@ -87,30 +97,32 @@ with adbc_driver_manager.dbapi.connect(
         print(cur.fetch_arrow_table().to_pydict())
 ```
 
-The DLL is fully self-contained: no .NET runtime, no DuckDB native library,
-no other dependencies at the call site.
+The library is fully self-contained: no .NET runtime, no DuckDB native
+library, no other dependencies at the call site.
 
 ## Building from source
 
-Prereqs: .NET 10 SDK. For the Native AOT build, also Windows + the Visual
-Studio 2026 build tools (MSVC v143+ and the Windows 11 SDK).
+Prereqs: .NET 10 SDK. The Native AOT build additionally needs the host's
+native toolchain — MSVC v143+ on Windows (Visual Studio 2022 or 2026 build
+tools), clang on Linux, and the Xcode command-line tools on macOS.
 
-```powershell
-# Managed build + unit tests (no server required)
+```bash
+# Managed build + unit tests (no server required, cross-platform)
 dotnet build
 dotnet test test/Quack.Tests
 
-# Integration + ADBC tests (require a local duckdb.exe with quack)
-#   set DuckDbExePath in QuackServerFixture or accept the default
-#   C:\src\duckdb\duckdb.exe
+# Integration + ADBC tests (require a local duckdb with the quack extension;
+# point QuackServerFixture.DuckDbExePath at it)
 dotnet test test/Quack.IntegrationTests
 dotnet test test/Quack.Adbc.Tests
 
-# Native AOT publish (Windows)
+# Native AOT publish for the host platform (cross-platform; uses pwsh)
 pwsh scripts/publish-native.ps1
-# -> src/Quack.Adbc.Native/bin/Release/net10.0/win-x64/publish/quack_adbc.dll
+# Or explicitly cross-RID:
+pwsh scripts/publish-native.ps1 -Runtime linux-arm64
+# -> src/Quack.Adbc.Native/bin/Release/net10.0/<rid>/publish/<lib>
 
-# End-to-end smoke test (spawns duckdb + loads DLL from Python)
+# End-to-end smoke test (spawns duckdb + loads native lib from Python)
 python scripts/smoke_test_python.py
 ```
 

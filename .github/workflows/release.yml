@@ -14,11 +14,36 @@ permissions:
   contents: write
 
 jobs:
-  build-windows:
-    name: Build win-x64 native DLL
-    runs-on: windows-latest
+  build-native:
+    name: Build ${{ matrix.rid }}
+    runs-on: ${{ matrix.os }}
     outputs:
       version: ${{ steps.derive-version.outputs.version }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+            lib: quack_adbc.dll
+            asset_prefix: quack_adbc
+          - os: ubuntu-latest
+            rid: linux-x64
+            lib: libquack_adbc.so
+            asset_prefix: libquack_adbc
+          - os: ubuntu-24.04-arm
+            rid: linux-arm64
+            lib: libquack_adbc.so
+            asset_prefix: libquack_adbc
+          - os: macos-13
+            rid: osx-x64
+            lib: libquack_adbc.dylib
+            asset_prefix: libquack_adbc
+          - os: macos-latest
+            rid: osx-arm64
+            lib: libquack_adbc.dylib
+            asset_prefix: libquack_adbc
 
     steps:
       - uses: actions/checkout@v4
@@ -45,32 +70,44 @@ jobs:
         run: dotnet build quack-net.slnx -c Release --no-restore -p:Version=${{ steps.derive-version.outputs.version }}
 
       - name: Unit tests
+        # Run unit tests only on Linux x64 — they're pure managed and the
+        # result is the same on every host. Skipping on the other runners
+        # saves ~2 minutes of redundant CPU per release.
+        if: matrix.rid == 'linux-x64'
         run: dotnet test test/Quack.Tests/Quack.Tests.csproj -c Release --no-build --verbosity normal
 
       - name: Publish Native AOT
         shell: pwsh
         run: |
-          pwsh scripts/publish-native.ps1 -Runtime win-x64 -Configuration Release
-          # Stage a versioned artifact name for the release asset.
-          $src = "src/Quack.Adbc.Native/bin/Release/net10.0/win-x64/publish/quack_adbc.dll"
-          $out = "artifacts/quack_adbc-${{ steps.derive-version.outputs.version }}-win-x64.dll"
+          pwsh scripts/publish-native.ps1 -Runtime ${{ matrix.rid }} -Configuration Release
+
+      - name: Stage release asset
+        shell: pwsh
+        run: |
+          $version = '${{ steps.derive-version.outputs.version }}'
+          $rid     = '${{ matrix.rid }}'
+          $lib     = '${{ matrix.lib }}'
+          $prefix  = '${{ matrix.asset_prefix }}'
+          $src     = "src/Quack.Adbc.Native/bin/Release/net10.0/$rid/publish/$lib"
+          $ext     = [System.IO.Path]::GetExtension($lib)
+          $assetName = "$prefix-$version-$rid$ext"
           New-Item -ItemType Directory -Force artifacts | Out-Null
-          Copy-Item $src $out
-          Get-FileHash $out -Algorithm SHA256 | ForEach-Object {
-            "$($_.Hash)  $(Split-Path $out -Leaf)" | Out-File "$out.sha256" -Encoding ascii
-          }
+          $dst = Join-Path 'artifacts' $assetName
+          Copy-Item $src $dst
+          $hash = (Get-FileHash $dst -Algorithm SHA256).Hash
+          "$hash  $assetName" | Out-File "$dst.sha256" -Encoding ascii
           Get-ChildItem artifacts
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: quack_adbc-win-x64
+          name: quack_adbc-${{ matrix.rid }}
           path: artifacts/
           if-no-files-found: error
 
   release:
     name: Publish GitHub release
-    needs: build-windows
+    needs: build-native
     runs-on: ubuntu-latest
 
     steps:
