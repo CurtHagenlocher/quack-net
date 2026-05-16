@@ -73,10 +73,11 @@ Each release publishes a self-contained native library per platform:
 
 | Platform | Asset |
 | --- | --- |
-| Windows x64 | `quack_adbc-<version>-win-x64.dll` |
-| Linux x64   | `quack_adbc-<version>-linux-x64.so` |
-| Linux arm64 | `quack_adbc-<version>-linux-arm64.so` |
-| macOS arm64 | `quack_adbc-<version>-osx-arm64.dylib` |
+| Windows x64   | `quack_adbc-<version>-win-x64.dll` |
+| Windows arm64 | `quack_adbc-<version>-win-arm64.dll` |
+| Linux x64     | `quack_adbc-<version>-linux-x64.so` |
+| Linux arm64   | `quack_adbc-<version>-linux-arm64.so` |
+| macOS arm64   | `quack_adbc-<version>-osx-arm64.dylib` |
 
 Download the right one, install `adbc-driver-manager`, and load it:
 
@@ -98,6 +99,43 @@ with adbc_driver_manager.dbapi.connect(
 
 The library is fully self-contained: no .NET runtime, no DuckDB native
 library, no other dependencies at the call site.
+
+## Using the Power BI connector
+
+Each release also includes a Power BI custom connector (`quack.mez`). To set it
+up:
+
+1. **Enable unsigned connectors.** In Power BI Desktop, go to
+   **File → Options and settings → Options → Security** and under
+   **Data Extensions** select **(Not Recommended) Allow any extension to load
+   without validation or warning**. Restart Power BI Desktop.
+
+2. **Copy the native ADBC driver.** Download the appropriate
+   `quack_adbc-<version>-win-<arch>.dll` from the release assets and copy it
+   into a new folder under the Power BI Desktop installation directory:
+
+   ```
+   <Power BI Desktop install>\bin\ADBC Drivers\Quack\quack_adbc.dll
+   ```
+
+   > This may require administrator privileges. Rename the file to
+   > `quack_adbc.dll` (dropping the version and RID suffix).
+
+3. **Install the custom connector.** Copy `quack.mez` into your Power BI
+   custom connectors folder. This is typically one of:
+
+   ```
+   %USERPROFILE%\Documents\Power BI Desktop\Custom Connectors\
+   %USERPROFILE%\OneDrive - Microsoft\Documents\Power BI Desktop\Custom Connectors\
+   ```
+
+   Create the `Custom Connectors` folder if it doesn't already exist.
+
+4. **Restart Power BI Desktop** if it was already running.
+
+When connecting, enter the URI from your `quack_serve` call (e.g.
+`quack:127.0.0.1:9494`) as the server address. When prompted for credentials,
+choose **Key** and enter the token you specified in the `quack_serve` call.
 
 ## Building from source
 
@@ -137,6 +175,7 @@ test/
   Quack.IntegrationTests/   end-to-end against a real duckdb.exe
   Quack.Adbc.Tests/      ADBC driver tests against the same server
   Quack.TestFixtures/    shared QuackServerFixture
+powerbi/                   Power BI custom connector (packaged as quack.mez)
 scripts/
   publish-native.ps1     wrapper that handles vswhere PATH issues
   smoke_test_python.py   Python load-and-query smoke test
