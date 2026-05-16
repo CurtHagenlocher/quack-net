@@ -27,6 +27,9 @@ jobs:
           - os: windows-latest
             rid: win-x64
             lib: quack_adbc.dll
+          - os: windows-11-arm
+            rid: win-arm64
+            lib: quack_adbc.dll
           - os: ubuntu-latest
             rid: linux-x64
             lib: quack_adbc.so
@@ -97,9 +100,29 @@ jobs:
           path: artifacts/
           if-no-files-found: error
 
+  build-powerbi:
+    name: Build Power BI connector
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package quack.mez
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Compress-Archive -Path powerbi/* -DestinationPath artifacts/quack.mez
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quack-powerbi
+          path: artifacts/
+          if-no-files-found: error
+
   release:
     name: Publish GitHub release
-    needs: build-native
+    needs: [build-native, build-powerbi]
     runs-on: ubuntu-latest
 
     steps:
