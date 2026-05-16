@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:import namespace="http://www.w3.org/XML/1998/namespace" />
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="metadata">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" />
+              </xsd:sequence>
+              <xsd:attribute name="name" use="required" type="xsd:string" />
+              <xsd:attribute name="type" type="xsd:string" />
+              <xsd:attribute name="mimetype" type="xsd:string" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="assembly">
+            <xsd:complexType>
+              <xsd:attribute name="alias" type="xsd:string" />
+              <xsd:attribute name="name" type="xsd:string" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+                <xsd:element name="comment" type="xsd:string" minOccurs="0" msdata:Ordinal="2" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" msdata:Ordinal="1" />
+              <xsd:attribute name="type" type="xsd:string" msdata:Ordinal="3" />
+              <xsd:attribute name="mimetype" type="xsd:string" msdata:Ordinal="4" />
+              <xsd:attribute name="errorCode" type="xsd:string" msdata:Ordinal="5" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="resheader">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <data name="ButtonTitle" errorCode="001" xml:space="preserve">
+    <value>Quack</value>
+    <comment>{Locked="Quack"}</comment>
+  </data>
+  <data name="ButtonHelp" errorCode="002" xml:space="preserve">
+    <value>Import data from Quack.</value>
+    <comment>{Locked="Quack"}</comment>
+  </data>
+  <data name="FormulaTitle" errorCode="003" xml:space="preserve">
+    <value>Quack</value>
+    <comment>{Locked="Quack"}</comment>
+  </data>
+  <data name="DatabaseParameterCaption" errorCode="004" xml:space="preserve">
+    <value>Database</value>
+  </data>
+  <data name="Quack_Description" errorCode="005" xml:space="preserve">
+    <value>Import data from a DuckDB database.</value>
+    <comment>{Locked="DuckDB"}</comment>
+  </data>
+  <data name="Quack_LongDescription" errorCode="006" xml:space="preserve">
+    <value>Returns a table listing the tables in the DuckDB database at &lt;code&gt;database&lt;/code&gt;. An optional record parameter, &lt;code&gt;options&lt;/code&gt;, may be specified to control the following options:
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;CommandTimeout&lt;/code&gt;: The number of seconds to wait for a query to execute.&lt;/li&gt;
+&lt;/ul&gt;
+    </value>
+    <comment>{Locked="DuckDB"}</comment>
+  </data>
+  <data name="OptionsParameterCaption" errorCode="007" xml:space="preserve">
+    <value>Advanced Options</value>
+  </data>
+  <data name="CommandTimeoutCaption" errorCode="008" xml:space="preserve">
+    <value>Command timeout in seconds</value>
+  </data>
+  <data name="ValidNonNegativeIntValue" errorCode="009" xml:space="preserve">
+    <value>non-negative integers</value>
+  </data>
+  <data name="InvalidOptionsKey" errorCode="010" xml:space="preserve">
+    <value>'#{0}' are not valid Quack options. Valid options are: '#{1}'</value>
+    <comment>{Locked="Quack"}</comment>
+  </data>
+  <data name="InvalidOptionsValue" errorCode="011" xml:space="preserve">
+    <value>This Quack function does not support the option '#{0}' with value '#{1}'. Valid value is #{2}.</value>
+    <comment>{Locked="Quack"}</comment>
+  </data>
+  <data name="AuthenticationLabel" errorCode="012" xml:space="preserve">
+    <value>Quack</value>
+    <comment>{Locked="Quack"}</comment>
+  </data>
+</root>
