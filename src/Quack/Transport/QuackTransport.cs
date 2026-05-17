@@ -19,6 +19,12 @@ public sealed class QuackTransport : IDisposable
 {
     private static readonly MediaTypeHeaderValue QuackMediaType = new("application/duckdb");
 
+    // Exact server-side wording from QuackServer::HandleMessage in
+    // duckdb-quack v1.5-variegata. Match is case-insensitive for forward
+    // robustness against minor server rewording (an upstream issue asks
+    // for a typed error code; until then string-matching is the contract).
+    private const string SessionExpiredServerMessage = "Invalid connection id";
+
     private readonly HttpClient _httpClient;
     private readonly bool _ownsHttpClient;
     private readonly Uri _endpoint;
@@ -91,7 +97,7 @@ public sealed class QuackTransport : IDisposable
                 // as one; otherwise just report the status.
                 if (responseBytes.Length > 0 && TryParseErrorMessage(responseBytes, out string? errorMessage))
                 {
-                    throw new QuackException(errorMessage);
+                    throw ToTypedError(message.ConnectionId, errorMessage);
                 }
                 throw new QuackException($"HTTP {(int)response.StatusCode} ({response.StatusCode}) from quack server at {_endpoint}.");
             }
@@ -108,11 +114,21 @@ public sealed class QuackTransport : IDisposable
 
             if (parsed is ErrorResponse error)
             {
-                throw new QuackException(error.Message);
+                throw ToTypedError(message.ConnectionId, error.Message);
             }
             return parsed;
         }
     }
+
+    // ErrorResponse on the wire could be a generic failure or a
+    // session-loss signal. The latter leaves the transport itself
+    // healthy — only the server-side session is gone — so we keep
+    // IsBroken untouched and let QuackConnection decide whether to
+    // re-handshake.
+    private static QuackException ToTypedError(string requestConnectionId, string serverMessage)
+        => serverMessage.Contains(SessionExpiredServerMessage, StringComparison.OrdinalIgnoreCase)
+            ? new QuackSessionExpiredException(requestConnectionId, serverMessage)
+            : new QuackException(serverMessage);
 
     public async Task<TResponse> SendAsync<TResponse>(QuackMessage message, CancellationToken cancellationToken = default)
         where TResponse : QuackMessage

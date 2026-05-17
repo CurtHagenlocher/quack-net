@@ -18,6 +18,16 @@ namespace Quack.Adbc;
 //                             quack v1.5-variegata has no cancel message.
 //                             May be overridden per-statement via
 //                             AdbcStatement.SetOption.
+//   reconnect_on_session_loss — "true"/"false" (default "false"). When
+//                             true, ExecuteQuery/ExecuteUpdate transparently
+//                             re-handshakes with the server if it reports
+//                             the connection_id is unknown (typical after
+//                             a server restart). Silently drops any
+//                             server-side session state (open transactions,
+//                             SET variables, ATTACH, temp tables); safe
+//                             only for stateless query workloads. Fetches
+//                             on an existing result set are never
+//                             auto-recovered.
 //
 // The driver itself is stateless; per-database state lives on
 // QuackAdbcDatabase.
@@ -26,6 +36,7 @@ public sealed class QuackAdbcDriver : AdbcDriver
     public const string UriParameter = "uri";
     public const string TokenParameter = "token";
     public const string CommandTimeoutSecondsParameter = "command_timeout_seconds";
+    public const string ReconnectOnSessionLossParameter = "reconnect_on_session_loss";
 
     public override AdbcDatabase Open(IReadOnlyDictionary<string, string> parameters)
     {

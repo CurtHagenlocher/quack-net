@@ -1,5 +1,6 @@
 using System.Globalization;
 using Apache.Arrow.Adbc;
+using Quack.Transport;
 
 namespace Quack.Adbc;
 
@@ -43,11 +44,22 @@ internal sealed class QuackAdbcDatabase : AdbcDatabase
             defaultCommandTimeout = ParseCommandTimeoutSeconds(timeoutText);
         }
 
+        bool autoReconnect = false;
+        if (_options.TryGetValue(QuackAdbcDriver.ReconnectOnSessionLossParameter, out string? reconnectText) &&
+            !string.IsNullOrEmpty(reconnectText))
+        {
+            if (!bool.TryParse(reconnectText, out autoReconnect))
+            {
+                throw AdbcException.NotImplemented(
+                    $"Invalid '{QuackAdbcDriver.ReconnectOnSessionLossParameter}' value '{reconnectText}'; expected 'true' or 'false'.");
+            }
+        }
+
         // ADBC's contract is synchronous; sync-over-async is acceptable here
         // because OpenAsync is a small handshake (no streaming) and there's
         // no SynchronizationContext to deadlock against in typical hosts.
         QuackConnection connection = QuackConnection
-            .OpenAsync(uri, token)
+            .OpenAsync(QuackUri.Parse(uri), token, autoReconnect: autoReconnect)
             .GetAwaiter()
             .GetResult();
         return new QuackAdbcConnection(connection, defaultCommandTimeout);
