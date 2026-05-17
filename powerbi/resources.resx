@@ -81,7 +81,7 @@
   <data name="Quack_LongDescription" errorCode="006" xml:space="preserve">
     <value>Returns a table listing the tables in the DuckDB database at &lt;code&gt;database&lt;/code&gt;. An optional record parameter, &lt;code&gt;options&lt;/code&gt;, may be specified to control the following options:
 &lt;ul&gt;
-&lt;li&gt;&lt;code&gt;CommandTimeout&lt;/code&gt;: The number of seconds to wait for a query to execute.&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;CommandTimeout&lt;/code&gt;: A &lt;code&gt;duration&lt;/code&gt; bounding how long to wait for a query to execute. If the timeout fires, the connection is no longer usable and must be reopened.&lt;/li&gt;
 &lt;/ul&gt;
     </value>
     <comment>{Locked="DuckDB"}</comment>
@@ -90,10 +90,10 @@
     <value>Advanced Options</value>
   </data>
   <data name="CommandTimeoutCaption" errorCode="008" xml:space="preserve">
-    <value>Command timeout in seconds</value>
+    <value>Command timeout</value>
   </data>
-  <data name="ValidNonNegativeIntValue" errorCode="009" xml:space="preserve">
-    <value>non-negative integers</value>
+  <data name="ValidPositiveDurationValue" errorCode="009" xml:space="preserve">
+    <value>positive durations</value>
   </data>
   <data name="InvalidOptionsKey" errorCode="010" xml:space="preserve">
     <value>'#{0}' are not valid Quack options. Valid options are: '#{1}'</value>

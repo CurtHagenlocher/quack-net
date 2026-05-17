@@ -23,7 +23,7 @@ AddConnectionStringOption = (options as record, name as text, value as any, opti
 ValidateOptions = (options) as record =>
     let
         ValidOptionsMap = #table({"Name", "Type", "Description", "Default", "Validate", "Hidden"},
-            {{"CommandTimeout", type nullable number, Extension.LoadString("ValidNonNegativeIntValue"), null, each _ = null or (_ >= 0 and Number.RoundDown(_) = _), false}}),
+            {{"CommandTimeout", type nullable duration, Extension.LoadString("ValidPositiveDurationValue"), null, each _ = null or _ > #duration(0, 0, 0, 0), false}}),
         ValidatedOptions = GetValidatedOptions(options, ValidOptionsMap)
     in
         ValidatedOptions;
@@ -65,7 +65,17 @@ Quack.Function = (uri as text, optional options as nullable record) as table =>
 
 QuackAdbcConnection = (uri as text, options as nullable record) =>
     let
-        ConnectionString = [uri = uri, token = Extension.CurrentCredential()[Key]],
+        // ADBC parameter key matches QuackAdbcDriver.CommandTimeoutSecondsParameter.
+        // en-US culture forces a "." decimal separator so the C# parser (which
+        // uses InvariantCulture) accepts fractional values from any locale.
+        CommandTimeoutSeconds =
+            if options[CommandTimeout]? <> null
+                then Number.ToText(Duration.TotalSeconds(options[CommandTimeout]), "G", "en-US")
+                else null,
+        ConnectionString = AddConnectionStringOption(
+            [uri = uri, token = Extension.CurrentCredential()[Key]],
+            "command_timeout_seconds",
+            CommandTimeoutSeconds),
         Connection = Adbc.Connection(Driver, ConnectionString, [], [ConnectionPoolType = 2]),
         ExecuteQueryCtor = (cxn) => (sql, optional opts) =>
             let
@@ -350,9 +360,9 @@ MakeUniqueIdentifier = (connectionString) => [Module = ModuleIdentifier, Signatu
 // Type for the exported function
 Quack.Type =
     let
-        CommandTimeoutType = type nullable number meta [
+        CommandTimeoutType = type nullable duration meta [
             Documentation.FieldCaption = Extension.LoadString("CommandTimeoutCaption"),
-            Documentation.SampleValues = { 300 }
+            Documentation.SampleValues = { #duration(0, 0, 5, 0) }
         ],
         FunctionType = Type.ForFunction([
             Parameters = [
