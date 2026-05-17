@@ -72,8 +72,14 @@ QuackAdbcConnection = (uri as text, options as nullable record) =>
             if options[CommandTimeout]? <> null
                 then Number.ToText(Duration.TotalSeconds(options[CommandTimeout]), "G", "en-US")
                 else null,
+        // Default-on for the Power BI scenario: a server restart should not
+        // surface as an "invalid connection id" failure mid-report. The driver
+        // re-handshakes once on session loss and retries; safe here because
+        // the M layer only issues stateless catalog queries and SQL the
+        // visual layer generates fresh per refresh.
+        BaseOptions = [uri = uri, token = Extension.CurrentCredential()[Key], reconnect_on_session_loss = "true"],
         ConnectionString = AddConnectionStringOption(
-            [uri = uri, token = Extension.CurrentCredential()[Key]],
+            BaseOptions,
             "command_timeout_seconds",
             CommandTimeoutSeconds),
         Connection = Adbc.Connection(Driver, ConnectionString, [], [ConnectionPoolType = 2]),
