@@ -82,6 +82,7 @@
     <value>Returns a table listing the tables in the DuckDB database at &lt;code&gt;database&lt;/code&gt;. An optional record parameter, &lt;code&gt;options&lt;/code&gt;, may be specified to control the following options:
 &lt;ul&gt;
 &lt;li&gt;&lt;code&gt;CommandTimeout&lt;/code&gt;: A &lt;code&gt;duration&lt;/code&gt; bounding how long to wait for a query to execute. If the timeout fires, the connection is no longer usable and must be reopened.&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;ReconnectOnSessionLoss&lt;/code&gt;: When &lt;code&gt;true&lt;/code&gt;, the driver transparently re-handshakes after a server restart and retries the query. Defaults to &lt;code&gt;false&lt;/code&gt; because any server-side session state (transactions, &lt;code&gt;SET&lt;/code&gt;, temp tables) is silently dropped on reconnect.&lt;/li&gt;
 &lt;/ul&gt;
     </value>
     <comment>{Locked="DuckDB"}</comment>
@@ -94,6 +95,12 @@
   </data>
   <data name="ValidPositiveDurationValue" errorCode="009" xml:space="preserve">
     <value>positive durations</value>
+  </data>
+  <data name="ReconnectOnSessionLossCaption" errorCode="013" xml:space="preserve">
+    <value>Reconnect on session loss</value>
+  </data>
+  <data name="ValidLogicalValue" errorCode="014" xml:space="preserve">
+    <value>true or false</value>
   </data>
   <data name="InvalidOptionsKey" errorCode="010" xml:space="preserve">
     <value>'#{0}' are not valid Quack options. Valid options are: '#{1}'</value>

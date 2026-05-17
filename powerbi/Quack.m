@@ -26,7 +26,10 @@ AddConnectionStringOption = (options as record, name as text, value as any, opti
 ValidateOptions = (options) as record =>
     let
         ValidOptionsMap = #table({"Name", "Type", "Description", "Default", "Validate", "Hidden"},
-            {{"CommandTimeout", type nullable duration, Extension.LoadString("ValidPositiveDurationValue"), null, each _ = null or _ > #duration(0, 0, 0, 0), false}}),
+            {
+                {"CommandTimeout", type nullable duration, Extension.LoadString("ValidPositiveDurationValue"), null, each _ = null or _ > #duration(0, 0, 0, 0), false},
+                {"ReconnectOnSessionLoss", type nullable logical, Extension.LoadString("ValidLogicalValue"), false, each _ = null or _ is logical, false}
+            }),
         ValidatedOptions = GetValidatedOptions(options, ValidOptionsMap)
     in
         ValidatedOptions;
@@ -75,12 +78,16 @@ QuackAdbcConnection = (uri as text, options as nullable record) =>
             if options[CommandTimeout]? <> null
                 then Number.ToText(Duration.TotalSeconds(options[CommandTimeout]), "G", "en-US")
                 else null,
-        // Default-on for the Power BI scenario: a server restart should not
-        // surface as an "invalid connection id" failure mid-report. The driver
-        // re-handshakes once on session loss and retries; safe here because
-        // the M layer only issues stateless catalog queries and SQL the
-        // visual layer generates fresh per refresh.
-        BaseOptions = [uri = uri, token = Extension.CurrentCredential()[Key], reconnect_on_session_loss = "true"],
+        // Default false: server-side session state (transactions, SET, temp
+        // tables) survives within a session and would be silently dropped on
+        // a transparent reconnect. Users who know their workload is stateless
+        // can opt in via the ReconnectOnSessionLoss option.
+        ReconnectOnSessionLoss = if (options[ReconnectOnSessionLoss] ?? false) then "true" else "false",
+        BaseOptions = [
+            uri = uri,
+            token = Extension.CurrentCredential()[Key],
+            reconnect_on_session_loss = ReconnectOnSessionLoss
+        ],
         ConnectionString = AddConnectionStringOption(
             BaseOptions,
             "command_timeout_seconds",
@@ -373,6 +380,10 @@ Quack.Type =
             Documentation.FieldCaption = Extension.LoadString("CommandTimeoutCaption"),
             Documentation.SampleValues = { #duration(0, 0, 5, 0) }
         ],
+        ReconnectOnSessionLossType = type nullable logical meta [
+            Documentation.FieldCaption = Extension.LoadString("ReconnectOnSessionLossCaption"),
+            Documentation.SampleValues = { false }
+        ],
         FunctionType = Type.ForFunction([
             Parameters = [
                 uri = type text meta [
@@ -380,7 +391,8 @@ Quack.Type =
                     Documentation.SampleValues = { "quack:127.0.0.1:9494" }
                 ],
                 options = type [
-                    optional CommandTimeout = CommandTimeoutType
+                    optional CommandTimeout = CommandTimeoutType,
+                    optional ReconnectOnSessionLoss = ReconnectOnSessionLossType
                 ] meta [
                     Documentation.FieldCaption = Extension.LoadString("OptionsParameterCaption")
                 ]
