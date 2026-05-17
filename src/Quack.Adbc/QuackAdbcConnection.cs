@@ -11,12 +11,18 @@ internal sealed class QuackAdbcConnection : AdbcConnection
     private readonly QuackConnection _connection;
     private bool _disposed;
 
-    public QuackAdbcConnection(QuackConnection connection)
+    public QuackAdbcConnection(QuackConnection connection, TimeSpan? defaultCommandTimeout = null)
     {
         _connection = connection;
+        DefaultCommandTimeout = defaultCommandTimeout;
     }
 
     internal QuackConnection Underlying => _connection;
+
+    // Default per-query timeout inherited from the database parameters;
+    // statements may override via SetOption. See QuackAdbcDriver for the
+    // semantics — terminal for the connection on fire.
+    internal TimeSpan? DefaultCommandTimeout { get; }
 
     public override AdbcStatement CreateStatement()
     {

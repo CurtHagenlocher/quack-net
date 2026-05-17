@@ -7,6 +7,14 @@ namespace Quack.Transport;
 // HTTP transport for the quack protocol. Sends each message as a single
 // `POST /quack` with Content-Type `application/duckdb`. Mirrors the server in
 // duckdb_quack::QuackHttpServer.
+//
+// Default HttpClient has no timeout. The quack server has no in-protocol
+// cancel/interrupt (see QuackConnection comment), so an HTTP-level timeout
+// can only abort the request locally while leaving the server-side query
+// running on a session the client can no longer safely reuse. Callers who
+// want to bound a query pass a CancellationToken; cancellation marks the
+// transport broken (IsBroken == true) so QuackConnection.DisposeAsync skips
+// its DisconnectMessage attempt and just releases the socket.
 public sealed class QuackTransport : IDisposable
 {
     private static readonly MediaTypeHeaderValue QuackMediaType = new("application/duckdb");
@@ -14,8 +22,11 @@ public sealed class QuackTransport : IDisposable
     private readonly HttpClient _httpClient;
     private readonly bool _ownsHttpClient;
     private readonly Uri _endpoint;
+    private int _broken;
 
     public QuackUri Uri { get; }
+
+    public bool IsBroken => Volatile.Read(ref _broken) != 0;
 
     public QuackTransport(QuackUri uri, HttpClient? httpClient = null)
     {
@@ -33,6 +44,10 @@ public sealed class QuackTransport : IDisposable
     public async Task<QuackMessage> SendAsync(QuackMessage message, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(message);
+        if (IsBroken)
+        {
+            throw new QuackException("Transport is broken (a prior request was cancelled); open a new connection.");
+        }
 
         byte[] requestBytes = message.ToBytes();
 
@@ -46,14 +61,29 @@ public sealed class QuackTransport : IDisposable
         {
             response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
         }
+        catch (OperationCanceledException)
+        {
+            MarkBroken();
+            throw;
+        }
         catch (HttpRequestException ex)
         {
+            MarkBroken();
             throw new QuackException($"HTTP request to {_endpoint} failed: {ex.Message}", ex);
         }
 
         using (response)
         {
-            byte[] responseBytes = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+            byte[] responseBytes;
+            try
+            {
+                responseBytes = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                MarkBroken();
+                throw;
+            }
 
             if (!response.IsSuccessStatusCode)
             {
@@ -104,6 +134,8 @@ public sealed class QuackTransport : IDisposable
         }
     }
 
+    private void MarkBroken() => Interlocked.Exchange(ref _broken, 1);
+
     private static bool TryParseErrorMessage(ReadOnlyMemory<byte> bytes, out string message)
     {
         try
@@ -130,6 +162,12 @@ public sealed class QuackTransport : IDisposable
             PooledConnectionLifetime = TimeSpan.FromMinutes(10),
             PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
         };
-        return new HttpClient(handler);
+        // No HttpClient.Timeout: the quack protocol has no cancel/interrupt
+        // message, so a fired HttpClient.Timeout aborts the request locally
+        // and leaves the server-side query running on a session the client
+        // can't safely reuse. Callers wanting a query timeout pass a
+        // CancellationToken instead; QuackConnection treats cancellation as
+        // a terminal event for the connection.
+        return new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
     }
 }

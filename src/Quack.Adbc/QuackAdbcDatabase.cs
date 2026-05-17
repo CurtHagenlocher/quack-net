@@ -1,3 +1,4 @@
+using System.Globalization;
 using Apache.Arrow.Adbc;
 
 namespace Quack.Adbc;
@@ -35,6 +36,13 @@ internal sealed class QuackAdbcDatabase : AdbcDatabase
                 $"Missing required '{QuackAdbcDriver.TokenParameter}' parameter.");
         }
 
+        TimeSpan? defaultCommandTimeout = null;
+        if (_options.TryGetValue(QuackAdbcDriver.CommandTimeoutSecondsParameter, out string? timeoutText) &&
+            !string.IsNullOrEmpty(timeoutText))
+        {
+            defaultCommandTimeout = ParseCommandTimeoutSeconds(timeoutText);
+        }
+
         // ADBC's contract is synchronous; sync-over-async is acceptable here
         // because OpenAsync is a small handshake (no streaming) and there's
         // no SynchronizationContext to deadlock against in typical hosts.
@@ -42,11 +50,22 @@ internal sealed class QuackAdbcDatabase : AdbcDatabase
             .OpenAsync(uri, token)
             .GetAwaiter()
             .GetResult();
-        return new QuackAdbcConnection(connection);
+        return new QuackAdbcConnection(connection, defaultCommandTimeout);
     }
 
     public override void SetOption(string key, string value)
     {
         _options[key] = value;
+    }
+
+    internal static TimeSpan ParseCommandTimeoutSeconds(string text)
+    {
+        if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double seconds) ||
+            !double.IsFinite(seconds) || seconds <= 0)
+        {
+            throw AdbcException.NotImplemented(
+                $"Invalid '{QuackAdbcDriver.CommandTimeoutSecondsParameter}' value '{text}'; expected a positive number of seconds.");
+        }
+        return TimeSpan.FromSeconds(seconds);
     }
 }

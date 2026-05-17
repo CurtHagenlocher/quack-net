@@ -11,13 +11,15 @@ namespace Quack;
 // echoed in every subsequent request header until DisposeAsync sends the
 // DisconnectMessage.
 //
-// Cancellation caveat: cancelling a CancellationToken passed to any *Async
-// method aborts the local HTTP request immediately, but the v1.5-variegata
-// server has no equivalent of Connection::Interrupt() wired into its HTTP
-// handler. So a long-running query keeps executing server-side until it
-// completes on its own — the cancel saves client CPU/memory, not server
-// work. DisposeAsync (which sends DisconnectMessage) is still the only way
-// to make the server release the session.
+// Cancellation semantics (v1.5-variegata): the protocol has no
+// cancel/interrupt message, so cancellation is best-effort and terminal
+// for the connection. When a CancellationToken passed to any *Async method
+// fires, the local HTTP request is aborted and the underlying transport is
+// marked broken — subsequent *Async calls throw, and DisposeAsync skips
+// its DisconnectMessage attempt (which would race with the mid-flight
+// request) and just releases the socket. The server-side query keeps
+// running until it naturally completes; we cannot reclaim the session
+// before then. Callers who hit cancellation must dispose and reopen.
 public sealed class QuackConnection : IAsyncDisposable
 {
     private readonly QuackTransport _transport;
@@ -143,16 +145,19 @@ public sealed class QuackConnection : IAsyncDisposable
         {
             return;
         }
-        try
+        if (!_transport.IsBroken)
         {
-            await _transport
-                .SendAsync<SuccessResponse>(new DisconnectMessage { ConnectionId = ConnectionId }, CancellationToken.None)
-                .ConfigureAwait(false);
-        }
-        catch
-        {
-            // Best-effort: the server may already have gone away. Don't mask
-            // the original (probably more interesting) reason for disposing.
+            try
+            {
+                await _transport
+                    .SendAsync<SuccessResponse>(new DisconnectMessage { ConnectionId = ConnectionId }, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                // Best-effort: the server may already have gone away. Don't mask
+                // the original (probably more interesting) reason for disposing.
+            }
         }
         if (_ownsTransport)
         {

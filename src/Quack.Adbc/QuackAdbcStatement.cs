@@ -8,6 +8,8 @@ internal sealed class QuackAdbcStatement : AdbcStatement
 {
     private readonly QuackAdbcConnection _connection;
     private RecordBatch? _boundBatch;
+    private TimeSpan? _commandTimeoutOverride;
+    private bool _commandTimeoutOverrideSet;
     private bool _disposed;
 
     public QuackAdbcStatement(QuackAdbcConnection connection)
@@ -26,6 +28,20 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         _boundBatch = batch;
     }
 
+    public override void SetOption(string key, string value)
+    {
+        ThrowIfDisposed();
+        if (string.Equals(key, QuackAdbcDriver.CommandTimeoutSecondsParameter, StringComparison.Ordinal))
+        {
+            _commandTimeoutOverride = string.IsNullOrEmpty(value)
+                ? null
+                : QuackAdbcDatabase.ParseCommandTimeoutSeconds(value);
+            _commandTimeoutOverrideSet = true;
+            return;
+        }
+        base.SetOption(key, value);
+    }
+
     public override QueryResult ExecuteQuery()
     {
         ThrowIfDisposed();
@@ -39,10 +55,19 @@ internal sealed class QuackAdbcStatement : AdbcStatement
             throw new InvalidOperationException("SqlQuery must be set before calling ExecuteQuery.");
         }
 
-        QuackQueryResult result = _connection.Underlying
-            .ExecuteAsync(SqlQuery)
-            .GetAwaiter()
-            .GetResult();
+        using TimeoutScope scope = OpenTimeoutScope();
+        QuackQueryResult result;
+        try
+        {
+            result = _connection.Underlying
+                .ExecuteAsync(SqlQuery, scope.Token)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (OperationCanceledException) when (scope.FiredByTimeout)
+        {
+            throw new TimeoutException(scope.TimeoutMessage("ExecuteQuery"));
+        }
         return new QueryResult(-1, new QuackArrowArrayStream(result));
     }
 
@@ -60,10 +85,18 @@ internal sealed class QuackAdbcStatement : AdbcStatement
                     "SqlQuery (target table name) must be set when a RecordBatch is bound.");
             }
             DuckDbChunk chunk = RecordBatchConverter.ToDuckDbChunk(_boundBatch);
-            _connection.Underlying
-                .AppendAsync(SqlQuery, chunk)
-                .GetAwaiter()
-                .GetResult();
+            using TimeoutScope appendScope = OpenTimeoutScope();
+            try
+            {
+                _connection.Underlying
+                    .AppendAsync(SqlQuery, chunk, appendScope.Token)
+                    .GetAwaiter()
+                    .GetResult();
+            }
+            catch (OperationCanceledException) when (appendScope.FiredByTimeout)
+            {
+                throw new TimeoutException(appendScope.TimeoutMessage("ExecuteUpdate (append)"));
+            }
             long appended = _boundBatch.Length;
             _boundBatch.Dispose();
             _boundBatch = null;
@@ -77,14 +110,22 @@ internal sealed class QuackAdbcStatement : AdbcStatement
 
         // SQL-only path: execute and drain. quack doesn't return an affected-
         // row count, so we report -1 unless rows came back.
-        QuackQueryResult result = _connection.Underlying
-            .ExecuteAsync(SqlQuery)
-            .GetAwaiter()
-            .GetResult();
+        using TimeoutScope scope = OpenTimeoutScope();
         long total = 0;
-        foreach (DuckDbChunk chunk in result.ToListAsync().GetAwaiter().GetResult())
+        try
         {
-            total += chunk.RowCount;
+            QuackQueryResult result = _connection.Underlying
+                .ExecuteAsync(SqlQuery, scope.Token)
+                .GetAwaiter()
+                .GetResult();
+            foreach (DuckDbChunk chunk in result.ToListAsync(scope.Token).GetAwaiter().GetResult())
+            {
+                total += chunk.RowCount;
+            }
+        }
+        catch (OperationCanceledException) when (scope.FiredByTimeout)
+        {
+            throw new TimeoutException(scope.TimeoutMessage("ExecuteUpdate"));
         }
         return new UpdateResult(total == 0 ? -1 : total);
     }
@@ -106,5 +147,36 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         {
             throw new ObjectDisposedException(nameof(QuackAdbcStatement));
         }
+    }
+
+    private TimeoutScope OpenTimeoutScope()
+    {
+        TimeSpan? effective = _commandTimeoutOverrideSet
+            ? _commandTimeoutOverride
+            : _connection.DefaultCommandTimeout;
+        return new TimeoutScope(effective);
+    }
+
+    // Bundles the CTS lifecycle so callers can `using` it and ask whether
+    // a thrown OperationCanceledException originated from the timeout.
+    private readonly struct TimeoutScope : IDisposable
+    {
+        private readonly CancellationTokenSource? _cts;
+        public TimeSpan? Timeout { get; }
+
+        public TimeoutScope(TimeSpan? timeout)
+        {
+            Timeout = timeout;
+            _cts = timeout is null ? null : new CancellationTokenSource(timeout.Value);
+        }
+
+        public CancellationToken Token => _cts?.Token ?? CancellationToken.None;
+
+        public bool FiredByTimeout => _cts is not null && _cts.IsCancellationRequested;
+
+        public string TimeoutMessage(string operation)
+            => $"{operation} exceeded command_timeout_seconds={Timeout!.Value.TotalSeconds:0.###}; the ADBC connection is no longer usable.";
+
+        public void Dispose() => _cts?.Dispose();
     }
 }
