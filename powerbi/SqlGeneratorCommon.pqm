@@ -1,3 +1,6 @@
+// Copyright (c) Curt Hagenlocher. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See LICENSE in the project root for license information.
+
 //  This is SqlGenerator template that will be shared with connector developers. Connector developers will be able to
 //  use different base configurations, currently only Generators.Sql92.ID configuration is available.
 //     1) It has couple of configurations (have details in comments below) which can be overridden

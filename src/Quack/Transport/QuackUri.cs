@@ -1,3 +1,6 @@
+// Copyright (c) Curt Hagenlocher. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See LICENSE in the project root for license information.
+
 namespace Quack.Transport;
 
 // Parser/builder for `quack:host[:port]` URIs. Mirrors duckdb_quack::QuackUri.
