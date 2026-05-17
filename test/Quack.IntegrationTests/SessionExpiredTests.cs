@@ -1,10 +1,12 @@
 // Copyright (c) Curt Hagenlocher. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See LICENSE in the project root for license information.
 
+using System.Buffers.Binary;
 using Quack;
 using Quack.Data;
 using Quack.Protocol;
 using Quack.Transport;
+using Quack.Types;
 
 namespace Quack.IntegrationTests;
 
@@ -89,6 +91,61 @@ public class SessionExpiredTests : IClassFixture<QuackServerFixture>
     }
 
     [Fact]
+    public async Task AppendAsync_WithReconnect_TransparentlySucceeds()
+    {
+        await using QuackConnection conn = await QuackConnection.OpenAsync(
+            QuackUri.Parse(_server.QuackUri), _server.Token, autoReconnect: true);
+
+        // CREATE TABLE goes against the shared :memory: DB, not the per-
+        // session state, so it survives the reconnect we're about to force.
+        string table = "t_append_reconnect_" + Guid.NewGuid().ToString("N");
+        await (await conn.ExecuteAsync($"CREATE TABLE {table} (id INTEGER)")).ToListAsync();
+        Assert.Equal(0, conn.SessionGeneration);
+
+        await ForceServerForgetSessionAsync(conn);
+
+        // AppendAsync uses the same SendWithReconnectAsync helper but a
+        // different message type — exercising it here proves the helper's
+        // generic path works for Append, not just Execute.
+        await conn.AppendAsync(table, BuildSingleIntChunk(42));
+
+        Assert.Equal(1, conn.SessionGeneration);
+
+        // Verify the row landed by reading it back through the (now post-
+        // reconnect) session.
+        IReadOnlyList<DuckDbChunk> back = await (await conn
+            .ExecuteAsync($"SELECT id FROM {table}"))
+            .ToListAsync();
+        Assert.Equal(1, back.Sum(c => c.RowCount));
+        FixedSizeColumn col = Assert.IsType<FixedSizeColumn>(back[0].Columns[0]);
+        Assert.Equal(42, BinaryPrimitives.ReadInt32LittleEndian(col.GetBytes(0)));
+    }
+
+    [Fact]
+    public async Task RepeatedSessionLoss_ReconnectsEachTime()
+    {
+        await using QuackConnection conn = await QuackConnection.OpenAsync(
+            QuackUri.Parse(_server.QuackUri), _server.Token, autoReconnect: true);
+        Assert.Equal(0, conn.SessionGeneration);
+
+        // First cycle.
+        string idAfterOpen = conn.ConnectionId;
+        await ForceServerForgetSessionAsync(conn);
+        await (await conn.ExecuteAsync("SELECT 1")).ToListAsync();
+        Assert.Equal(1, conn.SessionGeneration);
+        string idAfterFirstReconnect = conn.ConnectionId;
+        Assert.NotEqual(idAfterOpen, idAfterFirstReconnect);
+
+        // Second cycle — make sure the lock/counter still behave after a
+        // prior reconnect and that we re-handshake again rather than (e.g.)
+        // sticking with a stale "already recovered" flag.
+        await ForceServerForgetSessionAsync(conn);
+        await (await conn.ExecuteAsync("SELECT 2")).ToListAsync();
+        Assert.Equal(2, conn.SessionGeneration);
+        Assert.NotEqual(idAfterFirstReconnect, conn.ConnectionId);
+    }
+
+    [Fact]
     public async Task ConcurrentExecuteAsync_ReconnectsOnce()
     {
         await using QuackConnection conn = await QuackConnection.OpenAsync(
@@ -102,5 +159,27 @@ public class SessionExpiredTests : IClassFixture<QuackServerFixture>
         // Exactly one re-handshake should have happened. If both callers
         // raced past the SessionGeneration guard we'd see 2.
         Assert.Equal(1, conn.SessionGeneration);
+    }
+
+    private static DuckDbChunk BuildSingleIntChunk(int value)
+    {
+        LogicalType intType = new(LogicalTypeId.Integer);
+        byte[] data = new byte[4];
+        BinaryPrimitives.WriteInt32LittleEndian(data, value);
+        return new DuckDbChunk
+        {
+            Types = [intType],
+            Columns =
+            [
+                new FixedSizeColumn
+                {
+                    Type = intType,
+                    Count = 1,
+                    ElementSize = 4,
+                    Data = data,
+                },
+            ],
+            RowCount = 1,
+        };
     }
 }
