@@ -258,12 +258,16 @@ FoldNavigationStep = (selector, loader, kind, optional immediate) =>
 
 GetTableType = (exec, catalog, schema, table) =>
     let
-        command = "SELECT column_name, data_type, is_nullable, numeric_precision, numeric_scale, character_maximum_length "
-            & "FROM information_schema.columns "
-            & "WHERE table_catalog = " & EscapeStringLiteral(catalog)
-            & " AND table_schema = " & EscapeStringLiteral(schema)
-            & " AND table_name = " & EscapeStringLiteral(table)
-            & " ORDER BY ordinal_position",
+        qualifiedName = EscapeIdentifier(catalog) & "." & EscapeIdentifier(schema) & "." & EscapeIdentifier(table),
+        command = "SELECT "
+            & "name AS column_name, "
+            & "type AS data_type, "
+            & "CASE WHEN ""notnull"" THEN 'NO' ELSE 'YES' END AS is_nullable, "
+            & "TRY_CAST(regexp_extract(type, '^DECIMAL\((\d+),\s*\d+\)$', 1) AS INTEGER) AS numeric_precision, "
+            & "TRY_CAST(regexp_extract(type, '^DECIMAL\(\d+,\s*(\d+)\)$', 1) AS INTEGER) AS numeric_scale, "
+            & "NULL::INTEGER AS character_maximum_length "
+            & "FROM pragma_table_info(" & EscapeStringLiteral(qualifiedName) & ") "
+            & "ORDER BY cid",
         columnInfo = Table.Buffer(exec(command, [IsMetadata = true])),
         columnNames = columnInfo[column_name],
         columnTypes = List.Transform(Table.ToRecords(columnInfo), each [
