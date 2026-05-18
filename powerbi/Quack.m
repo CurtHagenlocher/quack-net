@@ -258,14 +258,16 @@ FoldNavigationStep = (selector, loader, kind, optional immediate) =>
 
 GetTableType = (exec, catalog, schema, table) =>
     let
-        command = "SELECT column_name, data_type, "
-            & "CASE WHEN is_nullable THEN 'YES' ELSE 'NO' END AS is_nullable, "
-            & "numeric_precision, numeric_scale, character_maximum_length "
-            & "FROM duckdb_columns() "
-            & "WHERE database_name = " & EscapeStringLiteral(catalog)
-            & " AND schema_name = " & EscapeStringLiteral(schema)
-            & " AND table_name = " & EscapeStringLiteral(table)
-            & " ORDER BY column_index",
+        qualifiedName = EscapeIdentifier(catalog) & "." & EscapeIdentifier(schema) & "." & EscapeIdentifier(table),
+        command = "SELECT "
+            & "name AS column_name, "
+            & "type AS data_type, "
+            & "CASE WHEN ""notnull"" THEN 'NO' ELSE 'YES' END AS is_nullable, "
+            & "TRY_CAST(regexp_extract(type, '^DECIMAL\((\d+),\s*\d+\)$', 1) AS INTEGER) AS numeric_precision, "
+            & "TRY_CAST(regexp_extract(type, '^DECIMAL\(\d+,\s*(\d+)\)$', 1) AS INTEGER) AS numeric_scale, "
+            & "NULL::INTEGER AS character_maximum_length "
+            & "FROM pragma_table_info(" & EscapeStringLiteral(qualifiedName) & ") "
+            & "ORDER BY cid",
         columnInfo = Table.Buffer(exec(command, [IsMetadata = true])),
         columnNames = columnInfo[column_name],
         columnTypes = List.Transform(Table.ToRecords(columnInfo), each [
