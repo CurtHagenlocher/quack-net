@@ -153,7 +153,7 @@ GetDatabases = (context) =>
     let
         isLeaf = false,
         kind = "Database",
-        command = "USE system; SELECT DISTINCT catalog_name as name FROM system.information_schema.schemata",
+        command = "USE system.main; SELECT DISTINCT catalog_name as name FROM system.information_schema.schemata",
         tables = context[ExecuteQuery](command, [IsMetadata = true]),
         getSchemas = (name) => GetSchemas(context, name),
         withData = Table.AddColumn(tables, "Data", each getSchemas([name]), type table),
@@ -174,7 +174,7 @@ GetSchemas = (context, catalog) =>
     let
         isLeaf = false,
         kind = "Schema",
-        command = "USE system; SELECT schema_name as name FROM system.information_schema.schemata WHERE catalog_name = " & EscapeStringLiteral(catalog)
+        command = "USE system.main; SELECT schema_name as name FROM system.information_schema.schemata WHERE catalog_name = " & EscapeStringLiteral(catalog)
             & " AND schema_name NOT IN ('information_schema', 'pg_catalog')",
         schemas = context[ExecuteQuery](command, [IsMetadata = true]),
         getTables = (name) => GetTables(context, catalog, name),
@@ -196,7 +196,7 @@ GetTables = (context, catalog, schema) =>
     let
         isLeaf = true,
         kind = {"Table","View"},
-        command = "USE system; SELECT table_name as name, table_type FROM system.information_schema.tables WHERE table_catalog = " & EscapeStringLiteral(catalog)
+        command = "USE system.main; SELECT table_name as name, table_type FROM system.information_schema.tables WHERE table_catalog = " & EscapeStringLiteral(catalog)
             & " AND table_schema = " & EscapeStringLiteral(schema),
         tables = context[ExecuteQuery](command, [IsMetadata = true]),
         getTable = (name) => GetTable(context, catalog, schema, name),
@@ -258,7 +258,7 @@ FoldNavigationStep = (selector, loader, kind, optional immediate) =>
 
 GetTableType = (exec, catalog, schema, table) =>
     let
-        command = "USE system; SELECT column_name, data_type, is_nullable, numeric_precision, numeric_scale, character_maximum_length "
+        command = "USE system.main; SELECT column_name, data_type, is_nullable, numeric_precision, numeric_scale, character_maximum_length "
             & "FROM system.information_schema.columns "
             & "WHERE table_catalog = " & EscapeStringLiteral(catalog)
             & " AND table_schema = " & EscapeStringLiteral(schema)
@@ -354,7 +354,7 @@ GetColumnType = (dataType as text, isNullableText as text, numericPrecision, num
 
 GetPrimaryKeys = (exec, catalog, schema, table) =>
     let
-        command = "USE system; SELECT column_name FROM system.information_schema.table_constraints tc "
+        command = "USE system.main; SELECT column_name FROM system.information_schema.table_constraints tc "
             & "JOIN system.information_schema.key_column_usage kcu "
             & "ON tc.constraint_name = kcu.constraint_name "
             & "AND tc.table_catalog = kcu.table_catalog "
