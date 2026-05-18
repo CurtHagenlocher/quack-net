@@ -153,7 +153,7 @@ GetDatabases = (context) =>
     let
         isLeaf = false,
         kind = "Database",
-        command = "USE system.main; SELECT DISTINCT catalog_name as name FROM system.information_schema.schemata",
+        command = "SELECT database_name as name FROM duckdb_databases() WHERE NOT internal",
         tables = context[ExecuteQuery](command, [IsMetadata = true]),
         getSchemas = (name) => GetSchemas(context, name),
         withData = Table.AddColumn(tables, "Data", each getSchemas([name]), type table),
@@ -174,8 +174,8 @@ GetSchemas = (context, catalog) =>
     let
         isLeaf = false,
         kind = "Schema",
-        command = "USE system.main; SELECT schema_name as name FROM system.information_schema.schemata WHERE catalog_name = " & EscapeStringLiteral(catalog)
-            & " AND schema_name NOT IN ('information_schema', 'pg_catalog')",
+        command = "SELECT schema_name as name FROM duckdb_schemas() WHERE database_name = " & EscapeStringLiteral(catalog)
+            & " AND NOT internal",
         schemas = context[ExecuteQuery](command, [IsMetadata = true]),
         getTables = (name) => GetTables(context, catalog, name),
         withData = Table.AddColumn(schemas, "Data", each getTables([name]), type table),
@@ -196,8 +196,13 @@ GetTables = (context, catalog, schema) =>
     let
         isLeaf = true,
         kind = {"Table","View"},
-        command = "USE system.main; SELECT table_name as name, table_type FROM system.information_schema.tables WHERE table_catalog = " & EscapeStringLiteral(catalog)
-            & " AND table_schema = " & EscapeStringLiteral(schema),
+        command = "SELECT table_name as name, 'BASE TABLE' as table_type FROM duckdb_tables() WHERE NOT internal "
+            & "AND database_name = " & EscapeStringLiteral(catalog)
+            & " AND schema_name = " & EscapeStringLiteral(schema)
+            & " UNION ALL "
+            & "SELECT view_name as name, 'VIEW' as table_type FROM duckdb_views() WHERE NOT internal "
+            & "AND database_name = " & EscapeStringLiteral(catalog)
+            & " AND schema_name = " & EscapeStringLiteral(schema),
         tables = context[ExecuteQuery](command, [IsMetadata = true]),
         getTable = (name) => GetTable(context, catalog, schema, name),
         withData = Table.AddColumn(tables, "Data", each getTable([name]), type table),
@@ -258,12 +263,14 @@ FoldNavigationStep = (selector, loader, kind, optional immediate) =>
 
 GetTableType = (exec, catalog, schema, table) =>
     let
-        command = "USE system.main; SELECT column_name, data_type, is_nullable, numeric_precision, numeric_scale, character_maximum_length "
-            & "FROM system.information_schema.columns "
-            & "WHERE table_catalog = " & EscapeStringLiteral(catalog)
-            & " AND table_schema = " & EscapeStringLiteral(schema)
+        command = "SELECT column_name, data_type, "
+            & "CASE WHEN is_nullable THEN 'YES' ELSE 'NO' END AS is_nullable, "
+            & "numeric_precision, numeric_scale, character_maximum_length "
+            & "FROM duckdb_columns() "
+            & "WHERE database_name = " & EscapeStringLiteral(catalog)
+            & " AND schema_name = " & EscapeStringLiteral(schema)
             & " AND table_name = " & EscapeStringLiteral(table)
-            & " ORDER BY ordinal_position",
+            & " ORDER BY column_index",
         columnInfo = Table.Buffer(exec(command, [IsMetadata = true])),
         columnNames = columnInfo[column_name],
         columnTypes = List.Transform(Table.ToRecords(columnInfo), each [
@@ -354,17 +361,12 @@ GetColumnType = (dataType as text, isNullableText as text, numericPrecision, num
 
 GetPrimaryKeys = (exec, catalog, schema, table) =>
     let
-        command = "USE system.main; SELECT column_name FROM system.information_schema.table_constraints tc "
-            & "JOIN system.information_schema.key_column_usage kcu "
-            & "ON tc.constraint_name = kcu.constraint_name "
-            & "AND tc.table_catalog = kcu.table_catalog "
-            & "AND tc.table_schema = kcu.table_schema "
-            & "AND tc.table_name = kcu.table_name "
-            & "WHERE tc.constraint_type = 'PRIMARY KEY' "
-            & "AND tc.table_catalog = " & EscapeStringLiteral(catalog) & " "
-            & "AND tc.table_schema = " & EscapeStringLiteral(schema) & " "
-            & "AND tc.table_name = " & EscapeStringLiteral(table) & " "
-            & "ORDER BY kcu.ordinal_position",
+        command = "SELECT UNNEST(constraint_column_names) AS column_name "
+            & "FROM duckdb_constraints() "
+            & "WHERE constraint_type = 'PRIMARY KEY' "
+            & "AND database_name = " & EscapeStringLiteral(catalog) & " "
+            & "AND schema_name = " & EscapeStringLiteral(schema) & " "
+            & "AND table_name = " & EscapeStringLiteral(table),
         result = try exec(command, [IsMetadata = true]) otherwise #table({"column_name"}, {}),
         primaryKeyColumns = result[column_name]
     in
