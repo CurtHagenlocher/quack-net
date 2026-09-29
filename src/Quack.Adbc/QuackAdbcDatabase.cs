@@ -58,11 +58,22 @@ internal sealed class QuackAdbcDatabase : AdbcDatabase
             }
         }
 
+        bool useSSL = true;
+        if (_options.TryGetValue(QuackAdbcDriver.UseSSLParameter, out string? useSSLText) &&
+            !string.IsNullOrEmpty(useSSLText))
+        {
+            if (!bool.TryParse(useSSLText, out useSSL))
+            {
+                throw AdbcException.NotImplemented(
+                    $"Invalid '{QuackAdbcDriver.UseSSLParameter}' value '{useSSLText}'; expected 'true' or 'false'.");
+            }
+        }
+
         // ADBC's contract is synchronous; sync-over-async is acceptable here
         // because OpenAsync is a small handshake (no streaming) and there's
         // no SynchronizationContext to deadlock against in typical hosts.
         QuackConnection connection = QuackConnection
-            .OpenAsync(QuackUri.Parse(uri), token, autoReconnect: autoReconnect)
+            .OpenAsync(QuackUri.Parse(uri, useSSL), token, autoReconnect: autoReconnect)
             .GetAwaiter()
             .GetResult();
         return new QuackAdbcConnection(connection, defaultCommandTimeout);

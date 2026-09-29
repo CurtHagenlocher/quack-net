@@ -28,7 +28,8 @@ ValidateOptions = (options) as record =>
         ValidOptionsMap = #table({"Name", "Type", "Description", "Default", "Validate", "Hidden"},
             {
                 {"CommandTimeout", type nullable duration, Extension.LoadString("ValidPositiveDurationValue"), null, each _ = null or _ > #duration(0, 0, 0, 0), false},
-                {"ReconnectOnSessionLoss", type nullable logical, Extension.LoadString("ValidLogicalValue"), false, each _ = null or _ is logical, false}
+                {"ReconnectOnSessionLoss", type nullable logical, Extension.LoadString("ValidLogicalValue"), false, each _ = null or _ is logical, false},
+                {"UseSSL", type nullable logical, Extension.LoadString("ValidLogicalValue"), false, each _ = null or _ is logical, false}
             }),
         ValidatedOptions = GetValidatedOptions(options, ValidOptionsMap)
     in
@@ -83,10 +84,12 @@ QuackAdbcConnection = (uri as text, options as nullable record) =>
         // a transparent reconnect. Users who know their workload is stateless
         // can opt in via the ReconnectOnSessionLoss option.
         ReconnectOnSessionLoss = if (options[ReconnectOnSessionLoss] ?? false) then "true" else "false",
+        UseSSL = if (options[UseSSL] ?? false) then "true" else "false",
         BaseOptions = [
             uri = uri,
             token = Extension.CurrentCredential()[Key],
-            reconnect_on_session_loss = ReconnectOnSessionLoss
+            reconnect_on_session_loss = ReconnectOnSessionLoss,
+            use_ssl = UseSSL
         ],
         ConnectionString = AddConnectionStringOption(
             BaseOptions,
@@ -388,6 +391,10 @@ Quack.Type =
             Documentation.FieldCaption = Extension.LoadString("ReconnectOnSessionLossCaption"),
             Documentation.SampleValues = { false }
         ],
+        UseSSLType = type nullable logical meta [
+            Documentation.FieldCaption = Extension.LoadString("UseSSLCaption"),
+            Documentation.SampleValues = { false }
+        ],
         FunctionType = Type.ForFunction([
             Parameters = [
                 uri = type text meta [
@@ -396,7 +403,8 @@ Quack.Type =
                 ],
                 options = type [
                     optional CommandTimeout = CommandTimeoutType,
-                    optional ReconnectOnSessionLoss = ReconnectOnSessionLossType
+                    optional ReconnectOnSessionLoss = ReconnectOnSessionLossType,
+                    optional UseSSL = UseSSLType
                 ] meta [
                     Documentation.FieldCaption = Extension.LoadString("OptionsParameterCaption")
                 ]

@@ -40,6 +40,7 @@ public sealed class QuackAdbcDriver : AdbcDriver
     public const string TokenParameter = "token";
     public const string CommandTimeoutSecondsParameter = "command_timeout_seconds";
     public const string ReconnectOnSessionLossParameter = "reconnect_on_session_loss";
+    public const string UseSSLParameter = "use_ssl";
 
     public override AdbcDatabase Open(IReadOnlyDictionary<string, string> parameters)
     {

@@ -99,6 +99,9 @@
   <data name="ReconnectOnSessionLossCaption" errorCode="013" xml:space="preserve">
     <value>Reconnect on session loss</value>
   </data>
+  <data name="UseSSLCaption" errorCode="013" xml:space="preserve">
+    <value>Use SSL</value>
+  </data>
   <data name="ValidLogicalValue" errorCode="014" xml:space="preserve">
     <value>true or false</value>
   </data>
