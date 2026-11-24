@@ -22,7 +22,8 @@ public class SmokeTests : IClassFixture<QuackServerFixture>
     {
         await using QuackConnection conn = await QuackConnection.OpenAsync(_server.QuackUri, _server.Token);
         Assert.False(string.IsNullOrEmpty(conn.ConnectionId));
-        Assert.Equal(1UL, conn.QuackVersion);
+        Assert.Equal(QuackConnection.ProtocolVersion, conn.QuackVersion);
+        Assert.Equal(QuackConnection.DefaultHeartbeatTimeoutSeconds, conn.HeartbeatTimeoutSeconds);
         Assert.False(string.IsNullOrEmpty(conn.ServerDuckDbVersion));
     }
 

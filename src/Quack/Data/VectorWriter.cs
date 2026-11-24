@@ -1,6 +1,7 @@
 // Copyright (c) Curt Hagenlocher. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See LICENSE in the project root for license information.
 
+using System.Buffers.Binary;
 using Quack.Serialization;
 using Quack.Types;
 
@@ -84,6 +85,12 @@ internal static class VectorWriter
             throw new SerializationException(
                 $"VarBytesColumn has {col.Values.Length} values; expected {count}.");
         }
+        if (col.Type.Id != LogicalTypeId.Geometry)
+        {
+            WriteVarBytesBlobs(s, col, count);
+            return;
+        }
+        // GEOMETRY keeps the list form in DuckDB 2.0 (field 102, list<WKB>).
         s.WriteFieldId(102);
         s.BeginList((ulong)count);
         for (int i = 0; i < count; i++)
@@ -95,6 +102,38 @@ internal static class VectorWriter
             s.WriteBlob(payload);
         }
         s.EndList();
+    }
+
+    // DuckDB 2.0 string layout (StorageVersion V2_0_0): field 107 total byte
+    // count, field 108 one uint32 length per row (0 for NULL rows), field 109
+    // the non-NULL payloads back to back.
+    private static void WriteVarBytesBlobs(BinarySerializer s, VarBytesColumn col, int count)
+    {
+        byte[] lengths = new byte[sizeof(uint) * count];
+        long total = 0;
+        for (int i = 0; i < count; i++)
+        {
+            int length = col.Validity.IsValid(i) ? col.Values[i].GetValueOrDefault().Length : 0;
+            BinaryPrimitives.WriteUInt32LittleEndian(lengths.AsSpan(i * sizeof(uint), sizeof(uint)), (uint)length);
+            total += length;
+        }
+        byte[] bytes = new byte[checked((int)total)];
+        int offset = 0;
+        for (int i = 0; i < count; i++)
+        {
+            if (!col.Validity.IsValid(i))
+            {
+                continue;
+            }
+            ReadOnlySpan<byte> payload = col.Values[i].GetValueOrDefault().Span;
+            payload.CopyTo(bytes.AsSpan(offset));
+            offset += payload.Length;
+        }
+        s.WriteProperty(fieldId: 107, (ulong)total);
+        s.WriteFieldId(108);
+        s.WriteBlob(lengths);
+        s.WriteFieldId(109);
+        s.WriteBlob(bytes);
     }
 
     private static void WriteStructColumn(BinarySerializer s, StructColumn col, int count)

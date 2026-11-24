@@ -4,7 +4,7 @@
 namespace Quack.Types;
 
 // Mirror of duckdb::LogicalTypeId
-// (src/include/duckdb/common/types.hpp in duckdb/duckdb v1.5.x).
+// (src/include/duckdb/common/types.hpp in duckdb/duckdb v2.0.x).
 public enum LogicalTypeId : byte
 {
     Invalid = 0,
@@ -37,6 +37,7 @@ public enum LogicalTypeId : byte
     UInteger = 30,
     UBigInt = 31,
     TimestampTz = 32,
+    TimestampTzNs = 33,
     TimeTz = 34,
     TimeNs = 35,
     Bit = 36,
@@ -54,9 +55,12 @@ public enum LogicalTypeId : byte
     Map = 102,
     Table = 103,
     Enum = 104,
+    // LEGACY_AGGREGATE_STATE since DuckDB 2.0.
     AggregateState = 105,
     Lambda = 106,
     Union = 107,
     Array = 108,
     Variant = 109,
+    // Unnamed struct (DuckDB 2.0+); same physical layout and type info as STRUCT.
+    Tuple = 110,
 }

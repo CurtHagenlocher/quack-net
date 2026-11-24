@@ -61,10 +61,12 @@ public class QuackMessageTests
     public void FetchRequest_HugeIntUuidRoundTrips()
     {
         Int128 uuid = ((Int128)0x0123456789ABCDEFL << 64) | 0xFEDCBA9876543210UL;
-        FetchRequestMessage msg = new() { ConnectionId = "session", Uuid = uuid };
+        FetchRequestMessage msg = new() { ConnectionId = "session", QueryUuid = uuid, BatchIndex = 7, AckIndex = 6 };
 
         FetchRequestMessage parsed = Assert.IsType<FetchRequestMessage>(QuackMessage.Deserialize(msg.ToBytes()));
-        Assert.Equal(uuid, parsed.Uuid);
+        Assert.Equal(uuid, parsed.QueryUuid);
+        Assert.Equal(7UL, parsed.BatchIndex);
+        Assert.Equal(6UL, parsed.AckIndex);
     }
 
     [Fact]

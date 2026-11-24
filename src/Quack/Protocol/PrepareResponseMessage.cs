@@ -15,7 +15,8 @@ public sealed record PrepareResponseMessage : QuackMessage
     public IReadOnlyList<string> ResultNames { get; init; } = [];
     public bool NeedsMoreFetch { get; init; }
     public IReadOnlyList<DuckDbChunk> Results { get; init; } = [];
-    public Int128 ResultUuid { get; init; }
+    // Echoes PrepareRequestMessage.QueryUuid (named result_uuid in quack version 1).
+    public Int128 QueryUuid { get; init; }
 
     internal override void SerializeBody(BinarySerializer s)
     {
@@ -56,7 +57,7 @@ public sealed record PrepareResponseMessage : QuackMessage
         }
 
         d.BeginProperty(fieldId: 5);
-        Int128 resultUuid = d.ReadHugeInt();
+        Int128 queryUuid = d.ReadHugeInt();
 
         return new PrepareResponseMessage
         {
@@ -64,7 +65,7 @@ public sealed record PrepareResponseMessage : QuackMessage
             ResultNames = resultNames,
             NeedsMoreFetch = needsMoreFetch,
             Results = results,
-            ResultUuid = resultUuid,
+            QueryUuid = queryUuid,
         };
     }
 }

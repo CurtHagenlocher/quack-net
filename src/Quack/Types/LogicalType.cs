@@ -49,6 +49,7 @@ public sealed class LogicalType : IEquatable<LogicalType>
             case LogicalTypeId.TimestampMs:
             case LogicalTypeId.TimestampNs:
             case LogicalTypeId.TimestampTz:
+            case LogicalTypeId.TimestampTzNs:
                 return PhysicalType.Int64;
             case LogicalTypeId.Interval: return PhysicalType.Interval;
             case LogicalTypeId.Uuid: return PhysicalType.Int128;
@@ -64,6 +65,7 @@ public sealed class LogicalType : IEquatable<LogicalType>
             case LogicalTypeId.Map:
                 return PhysicalType.List;
             case LogicalTypeId.Struct:
+            case LogicalTypeId.Tuple:
             case LogicalTypeId.Union:
                 return PhysicalType.Struct;
             case LogicalTypeId.Array:

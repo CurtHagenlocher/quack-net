@@ -68,11 +68,14 @@ public class SessionExpiredTests : IClassFixture<QuackServerFixture>
         await using QuackConnection conn = await QuackConnection.OpenAsync(
             QuackUri.Parse(_server.QuackUri), _server.Token, autoReconnect: true);
 
-        // A multi-chunk result forces a real Fetch round-trip after the
-        // first batch arrives with PrepareResponse. 50k rows comfortably
-        // exceeds the server's chunk size and triggers NeedsMoreFetch.
+        // The result must outgrow what PREPARE carries inline, so a real
+        // Fetch round-trip follows. The server cuts batches at
+        // quack_target_batch_bytes (32 MiB by default) and inlines whole
+        // batches up to quack_prepare_inline_rows (24576), so ~48 MiB of
+        // flat UBIGINTs leaves at least one batch for FETCH. (A bare range()
+        // column is a sequence vector: a few bytes, all of it inline.)
         QuackQueryResult result = await conn.ExecuteAsync(
-            "SELECT i::INTEGER AS i FROM range(50000) t(i)");
+            "SELECT hash(i) AS h FROM range(6000000) t(i)");
 
         await using IAsyncEnumerator<DuckDbChunk> chunks = result
             .GetChunksAsync()
@@ -154,7 +157,18 @@ public class SessionExpiredTests : IClassFixture<QuackServerFixture>
 
         Task<QuackQueryResult> a = conn.ExecuteAsync("SELECT 1 AS a");
         Task<QuackQueryResult> b = conn.ExecuteAsync("SELECT 2 AS b");
-        await Task.WhenAll(a, b);
+        try
+        {
+            await Task.WhenAll(a, b);
+        }
+        catch (QuackException ex) when (ex is not QuackSessionExpiredException)
+        {
+            // Quack version 3 runs one statement per connection: a PREPARE
+            // that arrives while another runs supersedes it, so one of two
+            // concurrent queries may fail. That is not what this test is about.
+            Assert.Contains("superseded", ex.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        Assert.True(a.IsCompletedSuccessfully || b.IsCompletedSuccessfully);
 
         // Exactly one re-handshake should have happened. If both callers
         // raced past the SessionGeneration guard we'd see 2.

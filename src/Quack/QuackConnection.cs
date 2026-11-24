@@ -1,48 +1,67 @@
 // Copyright (c) Curt Hagenlocher. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See LICENSE in the project root for license information.
 
+using System.Buffers.Binary;
+using System.Globalization;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using Quack.Data;
 using Quack.Protocol;
 using Quack.Transport;
+using Quack.Types;
 
 namespace Quack;
 
-// A live quack-protocol session against a DuckDB server. Opening sends a
+// A live quack-protocol session against a DuckDB server (quack version 3, as
+// served by the quack extension of DuckDB 2.0). Opening sends a
 // ConnectionRequest and stashes the server-assigned session id; the id is
 // echoed in every subsequent request header until DisposeAsync sends the
 // DisconnectMessage.
 //
-// Cancellation semantics (v1.5-variegata): the protocol has no
-// cancel/interrupt message, so cancellation is best-effort and terminal
-// for the connection. When a CancellationToken passed to any *Async method
-// fires, the local HTTP request is aborted and the underlying transport is
-// marked broken — subsequent *Async calls throw, and DisposeAsync skips
-// its DisconnectMessage attempt (which would race with the mid-flight
-// request) and just releases the socket. The server-side query keeps
-// running until it naturally completes; we cannot reclaim the session
-// before then. Callers who hit cancellation must dispose and reopen.
+// Lease: the server keeps a connection only while it hears from it at least
+// once per HeartbeatTimeoutSeconds (default 60). Every request renews the
+// lease; a background timer sends a HeartbeatRequest about every third of the
+// timeout, so a long-running query or an idle connection is not reaped. An
+// expired lease aborts the running statement and surfaces as
+// QuackSessionExpiredException.
+//
+// Cancellation: CancelAsync sends a CancelRequest, which interrupts the query
+// on the server. A CancellationToken passed to any *Async method still aborts
+// only the local HTTP wait and marks the transport broken (the request may be
+// half-sent); subsequent *Async calls throw and DisposeAsync skips its
+// DisconnectMessage. To stop a query and keep the connection, call
+// CancelAsync instead of cancelling the token.
 //
 // Auto-reconnect (opt-in via OpenAsync's autoReconnect parameter): when
-// the server reports the connection_id is unknown — typically because the
-// server was restarted and its in-memory session map is gone — the next
-// ExecuteAsync/AppendAsync call will transparently re-handshake (sending
-// a fresh ConnectionRequest with the retained token) and retry once.
-// FetchAsync deliberately is NOT auto-recovered: the server's result_uuid
-// is gone and re-executing the query that produced it could have side
-// effects. Auto-reconnect silently drops session-level state on the
-// server (transactions, SET, ATTACH, temp tables, prepared statements)
-// — the user-visible recovery is correct only for stateless queries.
+// the server reports the session is gone — an unknown connection_id after a
+// server restart, or an expired lease — the next ExecuteAsync/AppendAsync
+// call transparently re-handshakes (sending a fresh ConnectionRequest with the
+// retained token) and retries once. Fetching the rest of a result is NOT
+// auto-recovered: the result is gone and re-executing the query that produced
+// it could have side effects. Auto-reconnect silently drops session-level
+// state on the server (transactions, SET, ATTACH, temp tables, prepared
+// statements) — the recovery is correct only for stateless queries.
 // SessionGeneration is bumped every time a re-handshake succeeds.
 public sealed class QuackConnection : IAsyncDisposable
 {
+    // The only protocol version this client speaks (duckdb-quack QUACK_VERSION).
+    public const ulong ProtocolVersion = 3;
+    // duckdb-quack's quack_default_heartbeat_timeout.
+    public const ulong DefaultHeartbeatTimeoutSeconds = 60;
+    // duckdb-quack's MAX_HEARTBEAT_TIMEOUT_SECONDS.
+    public const ulong MaxHeartbeatTimeoutSeconds = (ulong)long.MaxValue / 1000;
+
     private readonly QuackTransport _transport;
     private readonly bool _ownsTransport;
     private readonly string _token;
     private readonly bool _autoReconnect;
+    private readonly QuackConnectionOptions _options;
     private readonly SemaphoreSlim _reconnectLock = new(1, 1);
+    private readonly Timer _heartbeat;
     private string _connectionId;
+    private long _heartbeatTimeoutSeconds;
     private int _sessionGeneration;
     private int _disposed;
 
@@ -50,33 +69,39 @@ public sealed class QuackConnection : IAsyncDisposable
     public string ServerDuckDbVersion { get; }
     public string ServerPlatform { get; }
     public ulong QuackVersion { get; }
+    // The lease the server accepted for the current session.
+    public ulong HeartbeatTimeoutSeconds => (ulong)Interlocked.Read(ref _heartbeatTimeoutSeconds);
     public QuackUri ServerUri => _transport.Uri;
     public int SessionGeneration => Volatile.Read(ref _sessionGeneration);
     public bool AutoReconnect => _autoReconnect;
 
     internal QuackTransport Transport => _transport;
 
-    private QuackConnection(QuackTransport transport, bool ownsTransport, string token, bool autoReconnect, ConnectionResponseMessage response)
+    private QuackConnection(QuackTransport transport, bool ownsTransport, string token, bool autoReconnect, QuackConnectionOptions options, ConnectionResponseMessage response)
     {
         _transport = transport;
         _ownsTransport = ownsTransport;
         _token = token;
         _autoReconnect = autoReconnect;
+        _options = options;
         _connectionId = response.ConnectionId;
+        _heartbeatTimeoutSeconds = (long)response.HeartbeatTimeoutSeconds;
         ServerDuckDbVersion = response.ServerDuckDbVersion;
         ServerPlatform = response.ServerPlatform;
         QuackVersion = response.QuackVersion;
+        _heartbeat = new Timer(static state => ((QuackConnection)state!).OnHeartbeat(), this, Timeout.Infinite, Timeout.Infinite);
+        ScheduleHeartbeat();
     }
 
     public static Task<QuackConnection> OpenAsync(string quackUri, string token, CancellationToken cancellationToken = default)
         => OpenAsync(QuackUri.Parse(quackUri), token, cancellationToken: cancellationToken);
 
-    public static async Task<QuackConnection> OpenAsync(QuackUri uri, string token, HttpClient? httpClient = null, bool autoReconnect = false, CancellationToken cancellationToken = default)
+    public static async Task<QuackConnection> OpenAsync(QuackUri uri, string token, HttpClient? httpClient = null, bool autoReconnect = false, QuackConnectionOptions? options = null, CancellationToken cancellationToken = default)
     {
         QuackTransport transport = new(uri, httpClient);
         try
         {
-            return await OpenInternalAsync(transport, ownsTransport: true, token, autoReconnect, cancellationToken).ConfigureAwait(false);
+            return await OpenInternalAsync(transport, ownsTransport: true, token, autoReconnect, options, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
@@ -85,37 +110,46 @@ public sealed class QuackConnection : IAsyncDisposable
         }
     }
 
-    public static Task<QuackConnection> OpenAsync(QuackTransport transport, string token, bool autoReconnect = false, CancellationToken cancellationToken = default)
-        => OpenInternalAsync(transport, ownsTransport: false, token, autoReconnect, cancellationToken);
+    public static Task<QuackConnection> OpenAsync(QuackTransport transport, string token, bool autoReconnect = false, QuackConnectionOptions? options = null, CancellationToken cancellationToken = default)
+        => OpenInternalAsync(transport, ownsTransport: false, token, autoReconnect, options, cancellationToken);
 
-    private static async Task<QuackConnection> OpenInternalAsync(QuackTransport transport, bool ownsTransport, string token, bool autoReconnect, CancellationToken cancellationToken)
+    private static async Task<QuackConnection> OpenInternalAsync(QuackTransport transport, bool ownsTransport, string token, bool autoReconnect, QuackConnectionOptions? options, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(transport);
         ArgumentNullException.ThrowIfNull(token);
+        options ??= QuackConnectionOptions.Default;
+        options.Validate();
 
-        ConnectionResponseMessage response = await HandshakeAsync(transport, token, cancellationToken).ConfigureAwait(false);
-        return new QuackConnection(transport, ownsTransport, token, autoReconnect, response);
+        ConnectionResponseMessage response = await HandshakeAsync(transport, token, options, cancellationToken).ConfigureAwait(false);
+        return new QuackConnection(transport, ownsTransport, token, autoReconnect, options, response);
     }
 
-    private static async Task<ConnectionResponseMessage> HandshakeAsync(QuackTransport transport, string token, CancellationToken cancellationToken)
+    private static async Task<ConnectionResponseMessage> HandshakeAsync(QuackTransport transport, string token, QuackConnectionOptions options, CancellationToken cancellationToken)
     {
         ConnectionRequestMessage request = new()
         {
             AuthString = token,
             ClientDuckDbVersion = ClientLibraryVersion(),
             ClientPlatform = ClientPlatformString(),
-            MinSupportedQuackVersion = 1,
-            MaxSupportedQuackVersion = 1,
+            MinSupportedQuackVersion = ProtocolVersion,
+            MaxSupportedQuackVersion = ProtocolVersion,
+            ClientId = options.ClientId,
+            HeartbeatTimeoutSeconds = options.HeartbeatTimeoutSeconds,
         };
 
         ConnectionResponseMessage response = await transport
             .SendAsync<ConnectionResponseMessage>(request, cancellationToken)
             .ConfigureAwait(false);
 
-        if (response.QuackVersion != 1)
+        if (response.QuackVersion != ProtocolVersion)
         {
             throw new QuackException(
-                $"Server negotiated quack version {response.QuackVersion}, but this client only supports version 1.");
+                $"Server negotiated quack version {response.QuackVersion}, but this client only supports version {ProtocolVersion}.");
+        }
+        if (response.HeartbeatTimeoutSeconds is 0 or > MaxHeartbeatTimeoutSeconds)
+        {
+            throw new QuackException(
+                $"Server accepted an out-of-range heartbeat timeout of {response.HeartbeatTimeoutSeconds} seconds.");
         }
         return response;
     }
@@ -125,8 +159,9 @@ public sealed class QuackConnection : IAsyncDisposable
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(sqlQuery);
 
+        Int128 queryUuid = NewQueryUuid();
         PrepareResponseMessage response = await SendWithReconnectAsync<PrepareResponseMessage>(
-            id => new PrepareRequestMessage { ConnectionId = id, SqlQuery = sqlQuery },
+            id => new PrepareRequestMessage { ConnectionId = id, SqlQuery = sqlQuery, QueryUuid = queryUuid },
             cancellationToken).ConfigureAwait(false);
 
         // Snapshot ConnectionId after the (possibly retried) send so that
@@ -138,31 +173,157 @@ public sealed class QuackConnection : IAsyncDisposable
             columnNames: response.ResultNames,
             firstBatch: response.Results,
             needsMoreFetch: response.NeedsMoreFetch,
-            resultUuid: response.ResultUuid);
+            queryUuid: response.QueryUuid);
     }
 
-    public Task AppendAsync(string tableName, DuckDbChunk chunk, CancellationToken cancellationToken = default)
+    // Interrupts a query on the server. Int128.Zero cancels whatever runs on
+    // this connection; any other id must name the running query.
+    public async Task CancelAsync(Int128 queryUuid = default, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        _ = await _transport.SendAsync<SuccessResponse>(
+            new CancelRequestMessage { ConnectionId = ConnectionId, QueryUuid = queryUuid },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task<long> AppendAsync(string tableName, DuckDbChunk chunk, CancellationToken cancellationToken = default)
         => AppendAsync(schemaName: string.Empty, tableName: tableName, chunk: chunk, cancellationToken: cancellationToken);
 
-    public async Task AppendAsync(string schemaName, string tableName, DuckDbChunk chunk, CancellationToken cancellationToken = default)
+    public Task<long> AppendAsync(string schemaName, string tableName, DuckDbChunk chunk, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(chunk);
+        return AppendAsync(schemaName, tableName, [chunk], cancellationToken);
+    }
+
+    // Appends the chunks' rows to (schema.)table, by position, in ONE statement:
+    //   INSERT INTO t SELECT * FROM scan_data_from_quack_client(stream, NULL::STRUCT(...), ordered := true)
+    // prepared with inline_rows = 0, then one SEND_DATA batch per chunk (cut
+    // into pieces of at most 2048 rows, DuckDB's vector size, since the server
+    // hands each piece to its pipeline as it is) and a terminal SEND_DATA with
+    // the batch count (a lost batch fails the statement), then a FETCH of the
+    // inserted row count. Returns that count.
+    public async Task<long> AppendAsync(string schemaName, string tableName, IReadOnlyList<DuckDbChunk> chunks, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(schemaName);
         ArgumentException.ThrowIfNullOrEmpty(tableName);
-        ArgumentNullException.ThrowIfNull(chunk);
+        ArgumentNullException.ThrowIfNull(chunks);
 
-        _ = await SendWithReconnectAsync<SuccessResponse>(
-            id => new AppendRequestMessage
+        List<DuckDbChunk> batches = chunks.Where(c => c.RowCount > 0).ToList();
+        if (batches.Count == 0)
+        {
+            return 0;
+        }
+        IReadOnlyList<LogicalType> types = batches[0].Types;
+        foreach (DuckDbChunk chunk in batches)
+        {
+            if (!chunk.Types.SequenceEqual(types))
             {
-                ConnectionId = id,
-                SchemaName = schemaName,
-                TableName = tableName,
-                AppendChunk = chunk,
-            },
+                throw new ArgumentException("All chunks of one append must have the same column types.", nameof(chunks));
+            }
+        }
+
+        string streamId = Guid.NewGuid().ToString();
+        Int128 queryUuid = NewQueryUuid();
+        string sql = BuildAppendSql(schemaName, tableName, streamId, types);
+
+        _ = await SendWithReconnectAsync<PrepareResponseMessage>(
+            id => new PrepareRequestMessage { ConnectionId = id, SqlQuery = sql, QueryUuid = queryUuid, InlineRows = 0 },
             cancellationToken).ConfigureAwait(false);
+
+        string connectionId = ConnectionId;
+        try
+        {
+            for (int i = 0; i < batches.Count; i++)
+            {
+                _ = await _transport.SendAsync<SendDataResponseMessage>(
+                    new SendDataRequestMessage
+                    {
+                        ConnectionId = connectionId,
+                        StreamId = streamId,
+                        BatchIndex = (ulong)(i + 1),
+                        Chunks = DuckDbChunkSlicer.Split(batches[i]).ToList(),
+                    },
+                    cancellationToken).ConfigureAwait(false);
+            }
+            _ = await _transport.SendAsync<SendDataResponseMessage>(
+                new SendDataRequestMessage
+                {
+                    ConnectionId = connectionId,
+                    StreamId = streamId,
+                    TotalBatches = (ulong)batches.Count,
+                },
+                cancellationToken).ConfigureAwait(false);
+
+            // The statement's result is one row: the rows it inserted.
+            FetchResponseMessage result = await _transport.SendAsync<FetchResponseMessage>(
+                new FetchRequestMessage { ConnectionId = connectionId, QueryUuid = queryUuid, BatchIndex = 1, AckIndex = 1 },
+                cancellationToken).ConfigureAwait(false);
+            return ReadRowCount(result);
+        }
+        catch (Exception) when (!_transport.IsBroken)
+        {
+            // Otherwise the server statement keeps waiting for batches until the next query.
+            try
+            {
+                await _transport.SendAsync<SuccessResponse>(
+                    new CancelRequestMessage { ConnectionId = connectionId, QueryUuid = queryUuid },
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Best effort; keep the original error.
+            }
+            throw;
+        }
     }
 
-    // Sends a message that carries a connection_id (Prepare/Append). If the
+    internal static string BuildAppendSql(string schemaName, string tableName, string streamId, IReadOnlyList<LogicalType> types)
+    {
+        StringBuilder sb = new("INSERT INTO ");
+        if (schemaName.Length > 0)
+        {
+            sb.Append(LogicalTypeSql.QuoteIdentifier(schemaName)).Append('.');
+        }
+        sb.Append(LogicalTypeSql.QuoteIdentifier(tableName));
+        sb.Append(" SELECT * FROM scan_data_from_quack_client('").Append(streamId.Replace("'", "''", StringComparison.Ordinal));
+        sb.Append("', NULL::STRUCT(");
+        for (int i = 0; i < types.Count; i++)
+        {
+            if (i > 0) sb.Append(", ");
+            sb.Append("col").Append(i.ToString(CultureInfo.InvariantCulture)).Append(' ').Append(LogicalTypeSql.ToSql(types[i]));
+        }
+        sb.Append("), ordered := true)");
+        return sb.ToString();
+    }
+
+    private static long ReadRowCount(FetchResponseMessage response)
+    {
+        foreach (DuckDbChunk chunk in response.Results)
+        {
+            if (chunk.RowCount > 0 && chunk.Columns.Count > 0 && chunk.Columns[0] is FixedSizeColumn count && count.ElementSize == sizeof(long))
+            {
+                return BinaryPrimitives.ReadInt64LittleEndian(count.GetBytes(0));
+            }
+        }
+        throw new QuackException("The append statement returned no row count.");
+    }
+
+    // A random, nonzero query id: the server reserves 0 for its catalog traffic.
+    internal static Int128 NewQueryUuid()
+    {
+        Span<byte> bytes = stackalloc byte[16];
+        Int128 value;
+        do
+        {
+            RandomNumberGenerator.Fill(bytes);
+            value = BinaryPrimitives.ReadInt128LittleEndian(bytes);
+        }
+        while (value == Int128.Zero);
+        return value;
+    }
+
+    // Sends a message that carries a connection_id (Prepare). If the
     // server reports the session is gone AND auto-reconnect is enabled,
     // re-handshakes once and retries the request with the new id. The lock
     // serialises concurrent reconnect attempts and the SessionGeneration
@@ -198,14 +359,54 @@ public sealed class QuackConnection : IAsyncDisposable
             {
                 return;
             }
-            ConnectionResponseMessage response = await HandshakeAsync(_transport, _token, cancellationToken).ConfigureAwait(false);
+            ConnectionResponseMessage response = await HandshakeAsync(_transport, _token, _options, cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _connectionId, response.ConnectionId);
+            Interlocked.Exchange(ref _heartbeatTimeoutSeconds, (long)response.HeartbeatTimeoutSeconds);
             Interlocked.Increment(ref _sessionGeneration);
+            ScheduleHeartbeat();
         }
         finally
         {
             _reconnectLock.Release();
         }
+    }
+
+    // About a third of the lease, with jitter (like DuckDB's own client).
+    private void ScheduleHeartbeat()
+    {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            return;
+        }
+        double intervalMs = HeartbeatTimeoutSeconds * 1000.0 / 3.0 * (0.8 + 0.4 * Random.Shared.NextDouble());
+        long dueTime = (long)Math.Clamp(intervalMs, 1.0, int.MaxValue - 1.0);
+        try
+        {
+            _heartbeat.Change(dueTime, Timeout.Infinite);
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+
+    private async void OnHeartbeat()
+    {
+        if (Volatile.Read(ref _disposed) != 0 || _transport.IsBroken)
+        {
+            return;
+        }
+        try
+        {
+            await _transport.SendAsync<SuccessResponse>(
+                new HeartbeatRequestMessage { ConnectionId = ConnectionId },
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            // A lost heartbeat is retried on the next tick; a dead session
+            // surfaces on the next real request.
+        }
+        ScheduleHeartbeat();
     }
 
     public async ValueTask DisposeAsync()
@@ -214,6 +415,7 @@ public sealed class QuackConnection : IAsyncDisposable
         {
             return;
         }
+        await _heartbeat.DisposeAsync().ConfigureAwait(false);
         if (!_transport.IsBroken)
         {
             try

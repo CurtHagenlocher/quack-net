@@ -17,8 +17,9 @@ namespace Quack.Adbc;
 //                             ExecuteQuery/ExecuteUpdate throws and the
 //                             ADBC connection becomes unusable — callers
 //                             must dispose and reopen. The server-side
-//                             query keeps running to completion because
-//                             quack v1.5-variegata has no cancel message.
+//                             query keeps running: quack version 3 has a
+//                             cancel message, but the driver does not send
+//                             it on timeout yet.
 //                             May be overridden per-statement via
 //                             AdbcStatement.SetOption.
 //   reconnect_on_session_loss — "true"/"false" (default "false"). When

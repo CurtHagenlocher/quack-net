@@ -3,7 +3,8 @@
 A pure-managed .NET client and Apache Arrow ADBC driver for DuckDB's `quack`
 remote protocol.
 
-> Status: experimental. The wire format (`v1.5-variegata`) and DuckDB's
+> Status: experimental. The wire format (quack protocol version 3, as served
+> by the `quack` extension of DuckDB `v2.0-cyanoptera`) and DuckDB's
 > server-side support are still in flux. Treat this as a moving target.
 
 ## What's in the box
@@ -16,17 +17,42 @@ remote protocol.
 
 ## Server requirements
 
-You need a DuckDB build that supports the `quack` extension. Today that means
-DuckDB **v1.5+** with the `quack` extension installed from `core_nightly`, and
-the protocol revision pinned to `v1.5-variegata`
-(`SerializationCompatibility(7)`). The integration test fixture installs the
-extension on demand:
+You need DuckDB **v2.0.x** with the `quack` core extension: quack protocol
+version 3, data serialized for storage version `V2_0_0` (verified against
+DuckDB v2.0.1 with quack `3bc63c0`). DuckDB 1.5's quack speaks protocol
+version 1 and is not supported by this client any more; the server rejects
+the handshake. The integration test fixture installs the extension on demand:
 
 ```sql
-INSTALL quack FROM core_nightly;
+INSTALL quack FROM core;
 LOAD quack;
 CALL quack_serve('quack:127.0.0.1:9494', token => 'your-token');
 ```
+
+The integration tests start the DuckDB CLI named by `QUACK_TEST_DUCKDB`
+(default `C:\src\duckdb\duckdb.exe`).
+
+### What protocol version 3 means for clients
+
+- **Heartbeat lease.** The server keeps a session only while it hears from it
+  at least once per heartbeat timeout (60 s by default,
+  `QuackConnectionOptions.HeartbeatTimeoutSeconds`). `QuackConnection` sends a
+  heartbeat about every third of that in the background; an expired lease
+  surfaces as `QuackSessionExpiredException`.
+- **One statement per connection.** A new query supersedes the one still
+  running on the same connection (it fails with *superseded by a new query*).
+  Use one `QuackConnection` per concurrent query.
+- **Cancel.** `QuackConnection.CancelAsync(queryUuid)` interrupts a query on
+  the server (`QuackQueryResult.QueryUuid`; `Int128.Zero` = whatever runs).
+- **Fetch.** Results arrive in dense, numbered batches (the leading ones inline
+  with PREPARE); the client checks the announced batch count and acknowledges
+  a complete result.
+- **Append.** `AppendAsync` runs one `INSERT INTO t SELECT * FROM
+  scan_data_from_quack_client(...)` per call and streams the chunks as
+  `SEND_DATA` batches (cut at 2048 rows); it returns the inserted row count.
+  Rows map to columns by position, as before.
+- **Errors** carry the server's exception type
+  (`QuackException.ServerExceptionType`, e.g. `Catalog`).
 
 ## Using `Quack` from .NET
 

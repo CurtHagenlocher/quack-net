@@ -93,6 +93,7 @@ internal static class ArrowConverter
         LogicalTypeId.TimestampMs => new TimestampType(TimeUnit.Millisecond, (string?)null),
         LogicalTypeId.TimestampNs => new TimestampType(TimeUnit.Nanosecond, (string?)null),
         LogicalTypeId.TimestampTz => new TimestampType(TimeUnit.Microsecond, "UTC"),
+        LogicalTypeId.TimestampTzNs => new TimestampType(TimeUnit.Nanosecond, "UTC"),
         LogicalTypeId.Interval => new IntervalType(IntervalUnit.MonthDayNanosecond),
 
         // Variable-width text + binary. BLOB, BIT, and GEOMETRY all ride
@@ -118,7 +119,7 @@ internal static class ArrowConverter
                 new Field("key", MapType(entryInfo.ChildTypes[0].Value), nullable: false),
                 new Field("value", MapType(entryInfo.ChildTypes[1].Value), nullable: true),
                 keySorted: false),
-        LogicalTypeId.Struct or LogicalTypeId.Union when logical.TypeInfo is StructTypeInfo sti
+        LogicalTypeId.Struct or LogicalTypeId.Tuple or LogicalTypeId.Union when logical.TypeInfo is StructTypeInfo sti
             => new StructType(BuildStructFields(sti)),
         LogicalTypeId.Array when logical.TypeInfo is ArrayTypeInfo ati
             => new FixedSizeListType(
@@ -208,6 +209,9 @@ internal static class ArrowConverter
             LogicalTypeId.TimestampTz => new TimestampArray(
                 new TimestampType(TimeUnit.Microsecond, "UTC"),
                 WrapData(column), validity, rowCount, nullCount, 0),
+            LogicalTypeId.TimestampTzNs => new TimestampArray(
+                new TimestampType(TimeUnit.Nanosecond, "UTC"),
+                WrapData(column), validity, rowCount, nullCount, 0),
 
             LogicalTypeId.Interval => BuildIntervalArray((FixedSizeColumn)column, validity, nullCount, rowCount),
 
@@ -220,7 +224,7 @@ internal static class ArrowConverter
 
             LogicalTypeId.List => BuildListArray((ListColumn)column, validity, nullCount, rowCount),
             LogicalTypeId.Map => BuildMapArray((ListColumn)column, validity, nullCount, rowCount),
-            LogicalTypeId.Struct or LogicalTypeId.Union => BuildStructArray((StructColumn)column, validity, nullCount, rowCount),
+            LogicalTypeId.Struct or LogicalTypeId.Tuple or LogicalTypeId.Union => BuildStructArray((StructColumn)column, validity, nullCount, rowCount),
             LogicalTypeId.Array => BuildFixedSizeListArray((ArrayColumn)column, validity, nullCount, rowCount),
 
             LogicalTypeId.SqlNull => new NullArray(rowCount),
