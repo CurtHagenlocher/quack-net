@@ -104,15 +104,16 @@ public class Adbc11Tests : IClassFixture<QuackServerFixture>
         Assert.Equal(1, ScalarInt(conn, "SELECT 1"));
     }
 
-    // An unsupported result type fails with NOT_IMPLEMENTED, and the query is
-    // closed on the server, so the connection goes on.
+    // A value without an Arrow form (an INTERVAL in a VARIANT) fails with
+    // NOT_IMPLEMENTED, and the query is closed on the server, so the
+    // connection goes on.
     [Fact]
     public void UnsupportedType_IsNotImplemented_AndTheConnectionGoesOn()
     {
         using AdbcConnection conn = OpenConnection();
         using (AdbcStatement stmt = conn.CreateStatement())
         {
-            stmt.SqlQuery = "SELECT 1::BIGNUM AS b";
+            stmt.SqlQuery = "SELECT (INTERVAL '1 day')::VARIANT AS v";
             Assert.Equal(AdbcStatusCode.NotImplemented, Assert.Throws<AdbcException>(() => ReadAll(stmt.ExecuteQuery())).Status);
         }
         Assert.Equal(1, ScalarInt(conn, "SELECT 1"));

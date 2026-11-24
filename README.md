@@ -149,6 +149,7 @@ RecordBatch? batch = await qr.Stream!.ReadNextRecordBatchAsync();
 | `use_ssl` | `true` / `false`, the older form of `quack.tls` |
 | `command_timeout_seconds` | per-call timeout (also a statement option) |
 | `reconnect_on_session_loss` | re-establish a lost session (not inside a transaction) |
+| `quack.arrow_lossless_conversion` | `true`: result types as DuckDB's `arrow_lossless_conversion` exports them (see Results); also a connection option |
 
 Errors carry an ADBC status from DuckDB's exception type (Catalog:
 `NOT_FOUND` / `ALREADY_EXISTS`, Constraint: `INTEGRITY`, Parser / Binder:
@@ -163,8 +164,27 @@ the connection unusable.
 
 - `ExecuteUpdate` returns DuckDB's own row count for INSERT, UPDATE, DELETE
   and CREATE TABLE AS, and -1 when the statement reports none (DDL, a query).
-- UUID arrives as its text, as DuckDB's own Arrow export sends it. On ingest,
-  `arrow.uuid` becomes a UUID and any other fixed-size binary a BLOB.
+- The Arrow types are DuckDB's own Arrow export's (checked column by column
+  against DuckDB 2.0.1's, values included), in both of its modes:
+
+  | DuckDB type | default | `quack.arrow_lossless_conversion` |
+  |---|---|---|
+  | BOOLEAN | `bool` | `arrow.bool8` |
+  | HUGEINT | `decimal128(38, 0)` | `arrow.opaque` (`hugeint`), 16 bytes |
+  | UHUGEINT | `decimal128(38, 0)` over its bits, so values from 2^127 read negative | `arrow.opaque` (`uhugeint`), 16 bytes |
+  | TIME WITH TIME ZONE | `time64[us]`, the time of day without its offset | `arrow.opaque` (`time_tz`), DuckDB's 8 bytes |
+  | UUID | its text | `arrow.uuid` |
+  | BIT | `binary` (DuckDB's bytes) | `arrow.opaque` (`bit`) |
+  | BIGNUM | `arrow.opaque` (`bignum`) | the same |
+  | GEOMETRY | `binary` WKB with `geoarrow.wkb` | the same |
+  | UNION | a sparse union; type ids are the member indexes, and a NULL row is member 0 with a null value | the same |
+
+  The opaque types carry `vendor_name` DuckDB. Ingest takes all of these back
+  (a DuckDB lossless result ingests to the same types and values); without the
+  extension metadata, `arrow.uuid` becomes a UUID and any other fixed-size
+  binary a BLOB. DuckDB itself fails on one round trip of its default form: a
+  HUGEINT below -10^38 ingested back as `DECIMAL(38,0)` makes a cast of it to
+  VARCHAR raise an INTERNAL error, which invalidates the server's database.
 - DuckDB 2.0's NULL type (a column of only NULLs) is Arrow's `null` type, both
   ways.
 - Ingest also takes large and view strings and binary, `time32`, negative
@@ -172,9 +192,13 @@ the connection unusable.
   decoded to their value type (an existing ENUM column takes the strings).
 - INTERVAL is `month_day_nano`; microseconds beyond the nanosecond range wrap,
   as in DuckDB's export.
-- A result type without an Arrow mapping (BIGNUM) fails with
+- A value without an Arrow form (an INTERVAL inside a VARIANT, which the
+  Parquet variant spec cannot express) fails with
   `ADBC_STATUS_NOT_IMPLEMENTED`; the query is cancelled on the server and the
   connection stays usable. So is any result that is released before its end.
+  Through the C API the error reaches the consumer from the stream's
+  `get_next`, which carries only an errno (Python sees an `OSError` with the
+  message).
 
 ### Bulk ingest
 

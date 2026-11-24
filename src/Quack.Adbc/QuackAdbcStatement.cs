@@ -162,7 +162,7 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         operation.StopTimeout();
         try
         {
-            return new QueryResult(-1, new QuackArrowArrayStream(result, operation));
+            return new QueryResult(-1, new QuackArrowArrayStream(result, operation, _connection.ArrowLossless));
         }
         catch (NotSupportedException e)
         {
@@ -202,7 +202,7 @@ internal sealed class QuackAdbcStatement : AdbcStatement
                 .GetAwaiter()
                 .GetResult();
             _ = result.ToListAsync(operation.Token).GetAwaiter().GetResult();
-            return ArrowConverter.BuildSchema(result.ColumnNames, result.ColumnTypes);
+            return ArrowConverter.BuildSchema(result.ColumnNames, result.ColumnTypes, _connection.ArrowLossless);
         }
         catch (OperationCanceledException) when (operation.Token.IsCancellationRequested)
         {
@@ -351,7 +351,7 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         {
             Schema schema = batch?.Schema ?? stream!.Schema;
             List<string> names = schema.FieldsList.Select(f => f.Name).ToList();
-            List<LogicalType> types = schema.FieldsList.Select(f => RecordBatchConverter.MapType(f.DataType)).ToList();
+            List<LogicalType> types = schema.FieldsList.Select(f => RecordBatchConverter.MapField(f)).ToList();
             using QuackOperation operation = BeginOperation();
             try
             {

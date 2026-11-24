@@ -18,15 +18,17 @@ internal sealed class QuackArrowArrayStream : IArrowArrayStream
     private readonly Schema _schema;
     // The statement's operation: a StatementCancel or ConnectionCancel stops the reads.
     private readonly QuackOperation? _operation;
+    private readonly bool _lossless;
     private CancellationTokenSource? _linked;
     private IAsyncEnumerator<DuckDbChunk>? _enumerator;
     private bool _disposed;
 
-    public QuackArrowArrayStream(QuackQueryResult result, QuackOperation? operation = null)
+    public QuackArrowArrayStream(QuackQueryResult result, QuackOperation? operation = null, bool lossless = false)
     {
         _result = result;
         _operation = operation;
-        _schema = ArrowConverter.BuildSchema(result.ColumnNames, result.ColumnTypes);
+        _lossless = lossless;
+        _schema = ArrowConverter.BuildSchema(result.ColumnNames, result.ColumnTypes, lossless);
     }
 
     public Schema Schema => _schema;
@@ -68,7 +70,7 @@ internal sealed class QuackArrowArrayStream : IArrowArrayStream
         DuckDbChunk chunk = _enumerator.Current;
         try
         {
-            return ArrowConverter.ToRecordBatch(_schema, chunk);
+            return ArrowConverter.ToRecordBatch(_schema, chunk, _lossless);
         }
         catch (NotSupportedException e)
         {

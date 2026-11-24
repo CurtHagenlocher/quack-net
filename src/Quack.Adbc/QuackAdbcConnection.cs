@@ -36,6 +36,16 @@ internal sealed class QuackAdbcConnection : AdbcConnection
 
     internal QuackConnection Underlying => _connection;
 
+    // QuackAdbcDriver.ArrowLosslessConversionParameter.
+    internal bool ArrowLossless { get; set; }
+
+    internal static bool ParseBool(string key, string value) => value switch
+    {
+        "true" => true,
+        "false" => false,
+        _ => throw new AdbcException($"Invalid value '{value}' for {key}; expected 'true' or 'false'.", AdbcStatusCode.InvalidArgument),
+    };
+
     // Default per-query timeout inherited from the database parameters;
     // statements may override via SetOption. See QuackAdbcDriver for the
     // semantics — terminal for the connection on fire.
@@ -99,6 +109,7 @@ internal sealed class QuackAdbcConnection : AdbcConnection
         CurrentCatalogOption => CurrentCatalog!,
         CurrentDbSchemaOption => CurrentDbSchema!,
         AutoCommitOption => _autoCommit ? "true" : "false",
+        QuackAdbcDriver.ArrowLosslessConversionParameter => ArrowLossless ? "true" : "false",
         _ => base.GetOption(key),
     };
 
@@ -113,12 +124,10 @@ internal sealed class QuackAdbcConnection : AdbcConnection
                 CurrentDbSchema = value;
                 return;
             case AutoCommitOption:
-                AutoCommit = value switch
-                {
-                    "true" => true,
-                    "false" => false,
-                    _ => throw new AdbcException($"Invalid value '{value}' for {AutoCommitOption}; expected 'true' or 'false'.", AdbcStatusCode.InvalidArgument),
-                };
+                AutoCommit = ParseBool(AutoCommitOption, value);
+                return;
+            case QuackAdbcDriver.ArrowLosslessConversionParameter:
+                ArrowLossless = ParseBool(key, value);
                 return;
         }
         base.SetOption(key, value);
@@ -339,7 +348,7 @@ internal sealed class QuackAdbcConnection : AdbcConnection
         string sql = $"SELECT * FROM {qualified} LIMIT 0";
         // Drains the result, which releases the streaming cursor on the server.
         _ = RunQuery(sql, out QuackQueryResult result, "GetTableSchema");
-        return ArrowConverter.BuildSchema(result.ColumnNames, result.ColumnTypes);
+        return ArrowConverter.BuildSchema(result.ColumnNames, result.ColumnTypes, ArrowLossless);
     }
 
     public override IArrowArrayStream GetTableTypes()

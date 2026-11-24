@@ -49,6 +49,12 @@ public sealed class QuackAdbcDriver : AdbcDriver
     public const string ReconnectOnSessionLossParameter = "reconnect_on_session_loss";
     public const string UseSSLParameter = "use_ssl";
 
+    // Result types as DuckDB's arrow_lossless_conversion exports them:
+    // HUGEINT, UHUGEINT, TIME_TZ and BIT as arrow.opaque, UUID as arrow.uuid.
+    // Off (the default): DuckDB's default Arrow types. A database or
+    // connection option.
+    public const string ArrowLosslessConversionParameter = "quack.arrow_lossless_conversion";
+
     public override AdbcDatabase Open(IReadOnlyDictionary<string, string> parameters)
     {
         ArgumentNullException.ThrowIfNull(parameters);

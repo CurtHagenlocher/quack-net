@@ -83,6 +83,13 @@ internal sealed class QuackAdbcDatabase : AdbcDatabase
             useSSL = parsedUseSSL;
         }
 
+        bool arrowLossless = false;
+        if (_options.TryGetValue(QuackAdbcDriver.ArrowLosslessConversionParameter, out string? losslessText) &&
+            !string.IsNullOrEmpty(losslessText))
+        {
+            arrowLossless = QuackAdbcConnection.ParseBool(QuackAdbcDriver.ArrowLosslessConversionParameter, losslessText);
+        }
+
         // ADBC's contract is synchronous; sync-over-async is acceptable here
         // because OpenAsync is a small handshake (no streaming) and there's
         // no SynchronizationContext to deadlock against in typical hosts.
@@ -119,7 +126,7 @@ internal sealed class QuackAdbcDatabase : AdbcDatabase
         {
             throw QuackAdbcException.From(e);
         }
-        return new QuackAdbcConnection(connection, defaultCommandTimeout);
+        return new QuackAdbcConnection(connection, defaultCommandTimeout) { ArrowLossless = arrowLossless };
     }
 
     private static readonly HashSet<string> KnownOptions =
@@ -130,6 +137,7 @@ internal sealed class QuackAdbcDatabase : AdbcDatabase
         QuackAdbcDriver.TlsParameter,
         QuackAdbcDriver.CommandTimeoutSecondsParameter,
         QuackAdbcDriver.ReconnectOnSessionLossParameter,
+        QuackAdbcDriver.ArrowLosslessConversionParameter,
     ];
 
     // An option the driver does not know is NOT_IMPLEMENTED, as ADBC asks.

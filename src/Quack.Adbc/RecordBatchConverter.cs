@@ -27,7 +27,7 @@ internal static class RecordBatchConverter
         for (int i = 0; i < batch.ColumnCount; i++)
         {
             Field field = batch.Schema.GetFieldByIndex(i);
-            types[i] = MapType(field.DataType);
+            types[i] = MapField(field);
             columns[i] = ToColumn(batch.Column(i), types[i], rowCount);
         }
         return new DuckDbChunk
@@ -35,6 +35,63 @@ internal static class RecordBatchConverter
             Types = types,
             Columns = columns,
             RowCount = rowCount,
+        };
+    }
+
+    // The field's extension metadata first: DuckDB's own arrow.opaque types
+    // (its lossless export) and geoarrow.wkb; otherwise the Arrow type.
+    internal static LogicalType MapField(Field field)
+    {
+        if (field.HasMetadata && field.Metadata.TryGetValue(ArrowConverter.ExtensionNameKey, out string? extension))
+        {
+            field.Metadata.TryGetValue(ArrowConverter.ExtensionMetadataKey, out string? metadata);
+            LogicalTypeId? id = (extension, field.DataType) switch
+            {
+                ("geoarrow.wkb", BinaryType or LargeBinaryType or BinaryViewType) => LogicalTypeId.Geometry,
+                ("arrow.bool8", Int8Type) => LogicalTypeId.Boolean,
+                // Over the C interface arrow.uuid arrives as this metadata on a fixed-size binary.
+                ("arrow.uuid", FixedSizeBinaryType { ByteWidth: 16 }) => LogicalTypeId.Uuid,
+                ("arrow.opaque", _) => DuckDbOpaque(metadata, field.DataType),
+                _ => null,
+            };
+            if (id is { } known)
+            {
+                return new LogicalType(known);
+            }
+        }
+        return MapType(field.DataType);
+    }
+
+    private static LogicalTypeId? DuckDbOpaque(string? metadata, IArrowType storage)
+    {
+        if (string.IsNullOrEmpty(metadata))
+        {
+            return null;
+        }
+        string? typeName;
+        string? vendor;
+        try
+        {
+            using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(metadata);
+            typeName = doc.RootElement.TryGetProperty("type_name", out System.Text.Json.JsonElement t) ? t.GetString() : null;
+            vendor = doc.RootElement.TryGetProperty("vendor_name", out System.Text.Json.JsonElement v) ? v.GetString() : null;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
+        if (vendor != "DuckDB")
+        {
+            return null;
+        }
+        return (typeName, storage) switch
+        {
+            ("hugeint", FixedSizeBinaryType { ByteWidth: 16 }) => LogicalTypeId.HugeInt,
+            ("uhugeint", FixedSizeBinaryType { ByteWidth: 16 }) => LogicalTypeId.UHugeInt,
+            ("time_tz", FixedSizeBinaryType { ByteWidth: 8 }) => LogicalTypeId.TimeTz,
+            ("bit", BinaryType) => LogicalTypeId.Bit,
+            ("bignum", BinaryType) => LogicalTypeId.BigNum,
+            _ => null,
         };
     }
 
@@ -87,12 +144,14 @@ internal static class RecordBatchConverter
         },
         IntervalType it when it.Unit == IntervalUnit.MonthDayNanosecond => new LogicalType(LogicalTypeId.Interval),
         ListType lt => new LogicalType(LogicalTypeId.List,
-            new ListTypeInfo { ChildType = MapType(lt.ValueDataType) }),
+            new ListTypeInfo { ChildType = MapField(lt.ValueField) }),
         FixedSizeListType fsl => new LogicalType(LogicalTypeId.Array,
-            new ArrayTypeInfo { ChildType = MapType(fsl.ValueDataType), Size = (uint)fsl.ListSize }),
+            new ArrayTypeInfo { ChildType = MapField(fsl.ValueField), Size = (uint)fsl.ListSize }),
         MapType mt => BuildMapLogicalType(mt),
         VariantType => LogicalType.Variant,
         StructType st => new LogicalType(LogicalTypeId.Struct, BuildStructTypeInfo(st)),
+        // A sparse union is DuckDB's UNION: STRUCT(tag, member...).
+        UnionType ut when ut.Mode == UnionMode.Sparse => BuildUnionLogicalType(ut),
         // Decoded to the value type, as DuckDB reads a dictionary (an existing
         // ENUM column takes the strings by DuckDB's own cast).
         DictionaryType dt when dt.ValueType is StringType or LargeStringType or StringViewType
@@ -108,12 +167,23 @@ internal static class RecordBatchConverter
         {
             ChildTypes =
             [
-                new("key", MapType(st.Fields[0].DataType)),
-                new("value", MapType(st.Fields[1].DataType)),
+                new("key", MapField(st.Fields[0])),
+                new("value", MapField(st.Fields[1])),
             ],
         };
         LogicalType entryType = new(LogicalTypeId.Struct, entryInfo);
         return new LogicalType(LogicalTypeId.Map, new ListTypeInfo { ChildType = entryType });
+    }
+
+    private static LogicalType BuildUnionLogicalType(UnionType ut)
+    {
+        KeyValuePair<string, LogicalType>[] children = new KeyValuePair<string, LogicalType>[ut.Fields.Count + 1];
+        children[0] = new("", new LogicalType(LogicalTypeId.UTinyInt));
+        for (int i = 0; i < ut.Fields.Count; i++)
+        {
+            children[i + 1] = new(ut.Fields[i].Name, MapField(ut.Fields[i]));
+        }
+        return new LogicalType(LogicalTypeId.Union, new StructTypeInfo { ChildTypes = children });
     }
 
     private static StructTypeInfo BuildStructTypeInfo(StructType st)
@@ -121,7 +191,7 @@ internal static class RecordBatchConverter
         KeyValuePair<string, LogicalType>[] children = new KeyValuePair<string, LogicalType>[st.Fields.Count];
         for (int i = 0; i < children.Length; i++)
         {
-            children[i] = new(st.Fields[i].Name, MapType(st.Fields[i].DataType));
+            children[i] = new(st.Fields[i].Name, MapField(st.Fields[i]));
         }
         return new StructTypeInfo { ChildTypes = children };
     }
@@ -132,6 +202,7 @@ internal static class RecordBatchConverter
         return array switch
         {
             VariantArray v => VariantArrowConverter.ToColumn(v, targetType, rowCount, validity),
+            Int8Array a when targetType.Id == LogicalTypeId.Boolean => Bool8(a, targetType, rowCount, validity),
             Int8Array a => Fixed(a.Data, targetType, rowCount, sizeof(sbyte), validity),
             Int16Array a => Fixed(a.Data, targetType, rowCount, sizeof(short), validity),
             Int32Array a => Fixed(a.Data, targetType, rowCount, sizeof(int), validity),
@@ -151,8 +222,13 @@ internal static class RecordBatchConverter
             // Decimal128Array : FixedSizeBinaryArray, MapArray : ListArray —
             // the subclass arms must come before their base-class arms.
             Decimal128Array a => NarrowDecimal(a, targetType, rowCount, validity),
+            // DuckDB's opaque 16- and 8-byte types: the bytes are its own layout.
+            FixedSizeBinaryArray a when targetType.Id is LogicalTypeId.HugeInt or LogicalTypeId.UHugeInt or LogicalTypeId.TimeTz
+                => Fixed(a.Data, targetType, rowCount, ((FixedSizeBinaryType)a.Data.DataType).ByteWidth, validity),
+            FixedSizeBinaryArray a when targetType.Id == LogicalTypeId.Uuid => Uuids(a, targetType, rowCount, validity),
             FixedSizeBinaryArray a => FixedToBlobs(a, targetType, rowCount, validity),
-            GuidArray a => Uuids(a, targetType, rowCount, validity),
+            SparseUnionArray a => BuildUnionColumn(a, targetType, rowCount),
+            GuidArray a => Uuids(a.StorageArray, targetType, rowCount, validity),
             BooleanArray a => UnpackBoolean(a, targetType, rowCount, validity),
             MonthDayNanosecondIntervalArray a => IntervalNanosToMicros(a, targetType, rowCount, validity),
             StringArray a => BuildVarBytes(a, targetType, rowCount, validity),
@@ -402,6 +478,18 @@ internal static class RecordBatchConverter
         };
     }
 
+    // arrow.bool8: any non-zero byte is true; DuckDB keeps 0 or 1.
+    private static FixedSizeColumn Bool8(Int8Array array, LogicalType type, int rowCount, ValidityMask validity)
+    {
+        byte[] data = new byte[rowCount];
+        ReadOnlySpan<sbyte> values = array.Values;
+        for (int i = 0; i < rowCount; i++)
+        {
+            data[i] = values[i] != 0 ? (byte)1 : (byte)0;
+        }
+        return new FixedSizeColumn { Type = type, Count = rowCount, ElementSize = 1, Data = data, Validity = validity };
+    }
+
     // A fixed-size binary as a BLOB: one slice of the value buffer per row.
     private static VarBytesColumn FixedToBlobs(FixedSizeBinaryArray array, LogicalType type, int rowCount, ValidityMask validity)
     {
@@ -417,16 +505,15 @@ internal static class RecordBatchConverter
     }
 
     // arrow.uuid holds RFC 4122 bytes; DuckDB a hugeint with the top bit flipped.
-    private static FixedSizeColumn Uuids(GuidArray array, LogicalType type, int rowCount, ValidityMask validity)
+    private static FixedSizeColumn Uuids(FixedSizeBinaryArray array, LogicalType type, int rowCount, ValidityMask validity)
     {
         byte[] data = new byte[rowCount * HugeintLayout.ByteSize];
-        Span<byte> bigEndian = stackalloc byte[16];
         for (int i = 0; i < rowCount; i++)
         {
-            if (array.GetGuid(i) is Guid guid)
+            if (!array.IsNull(i))
             {
-                guid.TryWriteBytes(bigEndian, bigEndian: true, out _);
-                UInt128 bits = System.Buffers.Binary.BinaryPrimitives.ReadUInt128BigEndian(bigEndian) ^ ((UInt128)1 << 127);
+                // The RFC 4122 bytes are the UUID's big-endian value.
+                UInt128 bits = System.Buffers.Binary.BinaryPrimitives.ReadUInt128BigEndian(array.GetBytes(i)) ^ ((UInt128)1 << 127);
                 HugeintLayout.WriteUnsigned(data.AsSpan(i * HugeintLayout.ByteSize, HugeintLayout.ByteSize), bits);
             }
         }
@@ -531,6 +618,57 @@ internal static class RecordBatchConverter
             Count = rowCount,
             Validity = validity,
             Fields = children,
+        };
+    }
+
+    // The type ids map to member indexes (the tag); a row is null when its
+    // selected member is (Arrow unions have no validity of their own).
+    private static StructColumn BuildUnionColumn(SparseUnionArray array, LogicalType type, int rowCount)
+    {
+        StructTypeInfo sti = (StructTypeInfo)type.TypeInfo!;
+        UnionType ut = (UnionType)array.Data.DataType;
+        Dictionary<int, byte> memberOf = [];
+        for (int m = 0; m < ut.TypeIds.Length; m++)
+        {
+            memberOf[ut.TypeIds[m]] = checked((byte)m);
+        }
+        DuckDbColumn[] members = new DuckDbColumn[array.Fields.Count];
+        for (int m = 0; m < members.Length; m++)
+        {
+            members[m] = ToColumn(array.Fields[m], sti.ChildTypes[m + 1].Value, rowCount);
+        }
+        byte[] tags = new byte[rowCount];
+        byte[] valid = new byte[ValidityMask.RequiredByteCount(rowCount)];
+        bool anyNull = false;
+        for (int i = 0; i < rowCount; i++)
+        {
+            byte member = memberOf.TryGetValue(array.TypeIds[i], out byte found)
+                ? found
+                : throw new InvalidDataException($"Union type id {array.TypeIds[i]} is not one of the union's.");
+            tags[i] = member;
+            if (array.Fields[member].IsValid(i))
+            {
+                valid[i >> 3] |= (byte)(1 << (i & 7));
+            }
+            else
+            {
+                anyNull = true;
+            }
+        }
+        FixedSizeColumn tag = new()
+        {
+            Type = sti.ChildTypes[0].Value,
+            Count = rowCount,
+            ElementSize = 1,
+            Data = tags,
+            Validity = ValidityMask.AllValid,
+        };
+        return new StructColumn
+        {
+            Type = type,
+            Count = rowCount,
+            Validity = anyNull ? new ValidityMask(valid) : ValidityMask.AllValid,
+            Fields = [tag, .. members],
         };
     }
 

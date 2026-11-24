@@ -102,19 +102,15 @@ public class TypeConversionTests : IClassFixture<QuackServerFixture>
 
         RecordBatch batch = await ReadFirstBatch(stmt);
         Decimal128Array h = Assert.IsType<Decimal128Array>(batch.Column(0));
-        FixedSizeBinaryArray u = Assert.IsType<FixedSizeBinaryArray>(batch.Column(1));
+        // Both as Decimal128(38, 0), as DuckDB exports them (ArrowTypeModeTests
+        // has UHUGEINT from 2^127 and the lossless forms).
+        Decimal128Array u = Assert.IsType<Decimal128Array>(batch.Column(1));
 
         Assert.Equal(38, ((Decimal128Type)h.Data.DataType).Precision);
-        Assert.Equal(16, ((FixedSizeBinaryType)u.Data.DataType).ByteWidth);
+        Assert.Equal(38, ((Decimal128Type)u.Data.DataType).Precision);
 
         Assert.Equal("12345678901234567890123456789", h.GetString(0));
-
-        // UHUGEINT comes back as raw 16 bytes; verify the bit pattern.
-        // DuckDB stores it lower-first, so the 16 bytes match LE encoding.
-        ReadOnlySpan<byte> bytes = u.GetBytes(0);
-        UInt128 reconstructed = (UInt128)System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(bytes[..8])
-            | ((UInt128)System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(bytes.Slice(8, 8)) << 64);
-        Assert.Equal(UInt128.Parse("12345678901234567890123456789"), reconstructed);
+        Assert.Equal("12345678901234567890123456789", u.GetString(0));
     }
 
     [Fact]
@@ -200,18 +196,17 @@ public class TypeConversionTests : IClassFixture<QuackServerFixture>
     }
 
     [Fact]
-    public async Task TimeTz_AsStructWithMicrosAndOffset()
+    public async Task TimeTz_AsTheTimeOfDay()
     {
         using AdbcConnection conn = OpenConnection();
         using AdbcStatement stmt = conn.CreateStatement();
         stmt.SqlQuery = "SELECT '12:34:56+02'::TIMETZ AS t";
 
+        // As DuckDB exports it: the time of day, without the offset.
         RecordBatch batch = await ReadFirstBatch(stmt);
-        StructArray col = Assert.IsType<StructArray>(batch.Column(0));
-        Int64Array micros = Assert.IsType<Int64Array>(col.Fields[0]);
-        Int32Array offset = Assert.IsType<Int32Array>(col.Fields[1]);
-        Assert.Equal(45_296_000_000L, micros.GetValue(0));
-        Assert.Equal(7200, offset.GetValue(0));
+        Time64Array col = Assert.IsType<Time64Array>(batch.Column(0));
+        Assert.Equal(TimeUnit.Microsecond, ((Time64Type)col.Data.DataType).Unit);
+        Assert.Equal(45_296_000_000L, col.GetValue(0));
     }
 
     [Fact]
