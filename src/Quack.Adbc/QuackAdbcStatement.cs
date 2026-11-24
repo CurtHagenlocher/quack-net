@@ -133,6 +133,11 @@ internal sealed class QuackAdbcStatement : AdbcStatement
             operation.Dispose();
             throw operation.Translate("ExecuteQuery");
         }
+        catch (QuackException e)
+        {
+            operation.Dispose();
+            throw QuackAdbcException.From(e);
+        }
         catch
         {
             operation.Dispose();
@@ -186,6 +191,10 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         catch (OperationCanceledException) when (operation.Token.IsCancellationRequested)
         {
             throw operation.Translate("ExecuteSchema");
+        }
+        catch (QuackException e)
+        {
+            throw QuackAdbcException.From(e);
         }
     }
 
@@ -256,6 +265,10 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         catch (OperationCanceledException) when (operation.Token.IsCancellationRequested)
         {
             throw operation.Translate("ExecuteUpdate");
+        }
+        catch (QuackException e)
+        {
+            throw QuackAdbcException.From(e);
         }
     }
 
@@ -335,6 +348,17 @@ internal sealed class QuackAdbcStatement : AdbcStatement
             catch (OperationCanceledException) when (operation.Token.IsCancellationRequested)
             {
                 throw operation.Translate("ExecuteUpdate (ingest)");
+            }
+            catch (QuackException e)
+            {
+                throw target.Mode is IngestMode.Append or IngestMode.CreateAppend
+                    ? QuackAdbcException.FromAppend(e)
+                    : QuackAdbcException.From(e);
+            }
+            catch (ArgumentException e)
+            {
+                // A batch whose columns differ from the bound schema's.
+                throw new AdbcException(e.Message, AdbcStatusCode.InvalidArgument, e);
             }
         }
         finally

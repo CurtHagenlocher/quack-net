@@ -9,7 +9,7 @@ using Quack.Serialization;
 namespace Quack.Transport;
 
 // HTTP transport for the quack protocol. Sends each message as a single
-// `POST /quack` with Content-Type `application/duckdb`. Mirrors the server in
+// `POST /quack` with Content-Type `application/vnd.duckdb`. Mirrors the server in
 // duckdb_quack::QuackHttpServer.
 //
 // Default HttpClient has no timeout. An HTTP-level timeout can only abort
@@ -21,7 +21,8 @@ namespace Quack.Transport;
 // DisconnectMessage attempt and just releases the socket.
 public sealed class QuackTransport : IDisposable
 {
-    private static readonly MediaTypeHeaderValue QuackMediaType = new("application/duckdb");
+    // What DuckDB's own quack client and server send.
+    private static readonly MediaTypeHeaderValue QuackMediaType = new("application/vnd.duckdb");
 
     // Exact server-side wording from QuackServer::DispatchMessage in
     // duckdb-quack v2.0-cyanoptera: an unknown connection id, and a session
@@ -47,7 +48,7 @@ public sealed class QuackTransport : IDisposable
     {
         Uri = uri;
         _endpoint = uri.HttpUrl;
-        _httpClient = httpClient ?? CreateDefaultClient();
+        _httpClient = httpClient ?? CreateDefaultClient(uri.SkipCertificateVerification);
         _ownsHttpClient = httpClient is null;
     }
 
@@ -119,6 +120,10 @@ public sealed class QuackTransport : IDisposable
                 // as one; otherwise just report the status.
                 if (responseBytes.Length > 0 && TryParseError(responseBytes, out ErrorResponse? errorResponse))
                 {
+                    if (errorResponse.MustInvalidate)
+                    {
+                        Volatile.Write(ref _broken, 1);
+                    }
                     throw ToTypedError(message.ConnectionId, errorResponse);
                 }
                 throw new QuackException($"HTTP {(int)response.StatusCode} ({response.StatusCode}) from quack server at {_endpoint}.")
@@ -139,6 +144,12 @@ public sealed class QuackTransport : IDisposable
 
             if (parsed is ErrorResponse error)
             {
+                // The server's own database died with this error: nothing on
+                // this connection can succeed any more.
+                if (error.MustInvalidate)
+                {
+                    Volatile.Write(ref _broken, 1);
+                }
                 throw ToTypedError(message.ConnectionId, error);
             }
             return parsed;
@@ -211,13 +222,18 @@ public sealed class QuackTransport : IDisposable
         return false;
     }
 
-    private static HttpClient CreateDefaultClient()
+    private static HttpClient CreateDefaultClient(bool skipCertificateVerification)
     {
         SocketsHttpHandler handler = new()
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(10),
             PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
         };
+        if (skipCertificateVerification)
+        {
+            // tls=skip_verify: encrypted, but any certificate is accepted.
+            handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
+        }
         // No HttpClient.Timeout: a fired HttpClient.Timeout aborts the
         // request locally and leaves the server-side query running on a
         // session the client can't safely reuse. Callers wanting a query

@@ -112,7 +112,9 @@ public class TransactionTests : IClassFixture<QuackServerFixture>
         await quack.Transport.SendAsync<Quack.Protocol.SuccessResponse>(
             new Quack.Protocol.DisconnectMessage { ConnectionId = quack.ConnectionId }, CancellationToken.None);
 
-        Assert.IsType<QuackSessionExpiredException>(Assert.ThrowsAny<Exception>(() => Execute(conn, $"INSERT INTO {table} VALUES (2)")));
+        AdbcException lost = Assert.ThrowsAny<AdbcException>(() => Execute(conn, $"INSERT INTO {table} VALUES (2)"));
+        Assert.Equal(AdbcStatusCode.InvalidState, lost.Status);
+        Assert.IsType<QuackSessionExpiredException>(lost.InnerException);
         Assert.Equal(session, quack.SessionGeneration);
         conn.Rollback();
         Assert.NotEqual(session, quack.SessionGeneration);

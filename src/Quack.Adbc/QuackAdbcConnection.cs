@@ -160,7 +160,7 @@ internal sealed class QuackAdbcConnection : AdbcConnection
         {
             RunTransactionCommand("COMMIT");
         }
-        catch (QuackSessionExpiredException) when (_connection.AutoReconnect)
+        catch (AdbcException e) when (e.InnerException is QuackSessionExpiredException && _connection.AutoReconnect)
         {
             RecoverSession();
             throw new AdbcException(
@@ -181,7 +181,7 @@ internal sealed class QuackAdbcConnection : AdbcConnection
         {
             RunTransactionCommand("ROLLBACK");
         }
-        catch (QuackSessionExpiredException) when (_connection.AutoReconnect)
+        catch (AdbcException e) when (e.InnerException is QuackSessionExpiredException && _connection.AutoReconnect)
         {
             RecoverSession();
             return;
@@ -275,6 +275,10 @@ internal sealed class QuackAdbcConnection : AdbcConnection
         catch (OperationCanceledException) when (operation.Token.IsCancellationRequested)
         {
             throw operation.Translate(operationName);
+        }
+        catch (QuackException e)
+        {
+            throw QuackAdbcException.From(e);
         }
     }
 

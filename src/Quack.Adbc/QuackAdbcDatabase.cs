@@ -34,10 +34,21 @@ internal sealed class QuackAdbcDatabase : AdbcDatabase
             throw AdbcException.NotImplemented(
                 $"Missing required '{QuackAdbcDriver.UriParameter}' parameter.");
         }
+        // quack://host:port/?token=...&tls=... (the other quack ADBC drivers'
+        // form) carries the token and TLS mode; explicit options win.
+        QuackUri parsedUri;
+        try
+        {
+            parsedUri = QuackUri.Parse(uri);
+        }
+        catch (ArgumentException e)
+        {
+            throw new AdbcException(e.Message, AdbcStatusCode.InvalidArgument);
+        }
         if (!_options.TryGetValue(QuackAdbcDriver.TokenParameter, out string? token))
         {
-            throw AdbcException.NotImplemented(
-                $"Missing required '{QuackAdbcDriver.TokenParameter}' parameter.");
+            token = parsedUri.Token ?? throw new AdbcException(
+                $"Missing required '{QuackAdbcDriver.TokenParameter}' parameter (or a token in the URI).", AdbcStatusCode.InvalidArgument);
         }
 
         TimeSpan? defaultCommandTimeout = null;
@@ -75,10 +86,39 @@ internal sealed class QuackAdbcDatabase : AdbcDatabase
         // ADBC's contract is synchronous; sync-over-async is acceptable here
         // because OpenAsync is a small handshake (no streaming) and there's
         // no SynchronizationContext to deadlock against in typical hosts.
-        QuackConnection connection = QuackConnection
-            .OpenAsync(QuackUri.Parse(uri, useSSL), token, autoReconnect: autoReconnect)
-            .GetAwaiter()
-            .GetResult();
+        bool skipVerify = parsedUri.SkipCertificateVerification;
+        if (_options.TryGetValue(QuackAdbcDriver.TlsParameter, out string? tlsText) && !string.IsNullOrEmpty(tlsText))
+        {
+            (bool useTls, skipVerify) = QuackUri.ParseTls(tlsText) ?? throw new AdbcException(
+                $"Invalid '{QuackAdbcDriver.TlsParameter}' value '{tlsText}'; expected 'true', 'false' or 'skip_verify'.", AdbcStatusCode.InvalidArgument);
+            if (useSSL is not null && useSSL != useTls)
+            {
+                throw new AdbcException($"'{QuackAdbcDriver.TlsParameter}' contradicts '{QuackAdbcDriver.UseSSLParameter}'.", AdbcStatusCode.InvalidArgument);
+            }
+            useSSL = useTls;
+        }
+        QuackUri target;
+        try
+        {
+            QuackUri resolved = QuackUri.Parse(uri, useSSL);
+            target = new QuackUri(resolved.Host, resolved.Port, resolved.UseSsl, skipVerify && resolved.UseSsl, resolved.Token);
+        }
+        catch (ArgumentException e)
+        {
+            throw new AdbcException(e.Message, AdbcStatusCode.InvalidArgument);
+        }
+        QuackConnection connection;
+        try
+        {
+            connection = QuackConnection
+                .OpenAsync(target, token, autoReconnect: autoReconnect)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (QuackException e)
+        {
+            throw QuackAdbcException.From(e);
+        }
         return new QuackAdbcConnection(connection, defaultCommandTimeout);
     }
 

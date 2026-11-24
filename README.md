@@ -139,6 +139,26 @@ QueryResult qr = stmt.ExecuteQuery();
 RecordBatch? batch = await qr.Stream!.ReadNextRecordBatchAsync();
 ```
 
+### Connection options and errors
+
+| option | meaning |
+|---|---|
+| `uri` | `quack:host[:port]`, or `quack://host[:port]/?token=...&tls=true\|false\|skip_verify` (the form the other quack ADBC drivers take) |
+| `token` | the server's token; overrides one in the URI |
+| `quack.tls` | `true` (verified TLS), `false` (plain HTTP) or `skip_verify` (TLS, any certificate); without it (or `tls` in the URI, or `use_ssl`), plain HTTP for a loopback host and TLS otherwise, like DuckDB's own client |
+| `use_ssl` | `true` / `false`, the older form of `quack.tls` |
+| `command_timeout_seconds` | per-call timeout (also a statement option) |
+| `reconnect_on_session_loss` | re-establish a lost session (not inside a transaction) |
+
+Errors carry an ADBC status from DuckDB's exception type (Catalog:
+`NOT_FOUND` / `ALREADY_EXISTS`, Constraint: `INTEGRITY`, Parser / Binder:
+`INVALID_ARGUMENT`, Conversion / Invalid Input: `INVALID_DATA`, Interrupt:
+`CANCELLED`, ...), and the exception type, `must_invalidate` and the server's
+`extra_info` as error details (`quack.exception_type`, ...). A bulk append
+whose data does not fit the table is `ALREADY_EXISTS`, as ADBC defines it.
+An error that says the server's own database died (`must_invalidate`) leaves
+the connection unusable.
+
 ### Results
 
 - `ExecuteUpdate` returns DuckDB's own row count for INSERT, UPDATE, DELETE

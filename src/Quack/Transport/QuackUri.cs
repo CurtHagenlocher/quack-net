@@ -16,6 +16,13 @@ public sealed class QuackUri
     public int Port { get; }
     public bool UseSsl { get; }
 
+    // tls=skip_verify: TLS without certificate validation.
+    public bool SkipCertificateVerification { get; }
+
+    // The token from a quack://host:port/?token=... URI, if it carried one.
+    // Not part of CanonicalUri or ToString, so it stays out of logs.
+    public string? Token { get; }
+
     public bool IsLocal => Host is "localhost" or "127.0.0.1" or "::1";
 
     public string CanonicalUri => Host.Contains(':')
@@ -33,7 +40,16 @@ public sealed class QuackUri
     }
 
     public QuackUri(string host, int port, bool useSsl)
+        : this(host, port, useSsl, skipCertificateVerification: false, token: null)
     {
+    }
+
+    public QuackUri(string host, int port, bool useSsl, bool skipCertificateVerification, string? token)
+    {
+        if (skipCertificateVerification && !useSsl)
+        {
+            throw new ArgumentException("Skipping certificate verification needs TLS.", nameof(skipCertificateVerification));
+        }
         if (string.IsNullOrEmpty(host))
         {
             throw new ArgumentException("Host must not be empty.", nameof(host));
@@ -45,6 +61,8 @@ public sealed class QuackUri
         Host = host;
         Port = port;
         UseSsl = useSsl;
+        SkipCertificateVerification = skipCertificateVerification;
+        Token = token;
     }
 
     public static QuackUri Parse(string uri, bool? useSsl = null)
@@ -52,9 +70,27 @@ public sealed class QuackUri
         ArgumentException.ThrowIfNullOrEmpty(uri);
 
         string remainder;
+        string? query = null;
         if (uri.StartsWith("quack://", StringComparison.OrdinalIgnoreCase))
         {
+            // The URL form, as the other quack ADBC drivers take it:
+            // quack://host[:port][/][?token=...&tls=true|false|skip_verify]
             remainder = uri[8..];
+            int questionMark = remainder.IndexOf('?');
+            if (questionMark >= 0)
+            {
+                query = remainder[(questionMark + 1)..];
+                remainder = remainder[..questionMark];
+            }
+            int slash = remainder.IndexOf('/');
+            if (slash >= 0)
+            {
+                if (slash != remainder.Length - 1)
+                {
+                    throw new ArgumentException($"A quack URI has no path: '{uri}'.", nameof(uri));
+                }
+                remainder = remainder[..slash];
+            }
         }
         else if (uri.StartsWith("quack:", StringComparison.OrdinalIgnoreCase))
         {
@@ -118,9 +154,56 @@ public sealed class QuackUri
             throw new ArgumentException($"Port {port} out of range [1, 65535] in URI: '{uri}'.", nameof(uri));
         }
 
-        bool resolvedUseSsl = useSsl ?? !(host is "localhost" or "127.0.0.1" or "::1");
-        return new QuackUri(host, port, resolvedUseSsl);
+        (string? token, bool? tls, bool skipVerify) = ParseQuery(uri, query);
+        if (tls is not null && useSsl is not null && tls != useSsl)
+        {
+            throw new ArgumentException($"The URI's tls parameter contradicts useSsl={useSsl}: '{uri}'.", nameof(uri));
+        }
+        bool resolvedUseSsl = tls ?? useSsl ?? !(host is "localhost" or "127.0.0.1" or "::1");
+        return new QuackUri(host, port, resolvedUseSsl, skipVerify, token);
     }
+
+    // token (the first one counts) and tls; other parameters are ignored.
+    private static (string? Token, bool? Tls, bool SkipVerify) ParseQuery(string uri, string? query)
+    {
+        string? token = null;
+        bool? tls = null;
+        bool skipVerify = false;
+        if (string.IsNullOrEmpty(query))
+        {
+            return (token, tls, skipVerify);
+        }
+        foreach (string pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int equals = pair.IndexOf('=');
+            string key = Uri.UnescapeDataString(equals < 0 ? pair : pair[..equals]);
+            string value = equals < 0 ? "" : Uri.UnescapeDataString(pair[(equals + 1)..].Replace('+', ' '));
+            switch (key)
+            {
+                case "token":
+                    token ??= value;
+                    break;
+                case "tls":
+                    if (tls is not null)
+                    {
+                        throw new ArgumentException($"Duplicate tls parameter in URI: '{uri}'.", nameof(uri));
+                    }
+                    (tls, skipVerify) = ParseTls(value) ?? throw new ArgumentException(
+                        $"Invalid tls parameter '{value}' in URI (expected true, false or skip_verify): '{uri}'.", nameof(uri));
+                    break;
+            }
+        }
+        return (token, tls, skipVerify);
+    }
+
+    // true (verified), false (plain HTTP) or skip_verify (TLS, any certificate).
+    public static (bool UseSsl, bool SkipVerify)? ParseTls(string value) => value switch
+    {
+        "true" => (true, false),
+        "false" => (false, false),
+        "skip_verify" or "skip-verify" => (true, true),
+        _ => null,
+    };
 
     public override string ToString() => CanonicalUri;
 }

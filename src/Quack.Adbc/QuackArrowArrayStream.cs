@@ -61,6 +61,10 @@ internal sealed class QuackArrowArrayStream : IArrowArrayStream
         {
             throw _operation.Translate("Reading the result");
         }
+        catch (QuackException e)
+        {
+            throw QuackAdbcException.From(e);
+        }
         DuckDbChunk chunk = _enumerator.Current;
         try
         {

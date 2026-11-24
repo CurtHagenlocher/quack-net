@@ -41,6 +41,11 @@ public sealed class QuackAdbcDriver : AdbcDriver
     public const string UriParameter = "uri";
     public const string TokenParameter = "token";
     public const string CommandTimeoutSecondsParameter = "command_timeout_seconds";
+
+    // TLS mode, as the other quack ADBC drivers name it: true (verified),
+    // false (plain HTTP) or skip_verify (TLS, any certificate). Also accepted
+    // as tls=... in a quack://host:port/?... URI.
+    public const string TlsParameter = "quack.tls";
     public const string ReconnectOnSessionLossParameter = "reconnect_on_session_loss";
     public const string UseSSLParameter = "use_ssl";
 
