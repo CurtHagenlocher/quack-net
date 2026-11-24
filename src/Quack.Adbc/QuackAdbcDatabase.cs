@@ -58,15 +58,18 @@ internal sealed class QuackAdbcDatabase : AdbcDatabase
             }
         }
 
-        bool useSSL = true;
+        // Unset leaves the choice to QuackUri.Parse: plain HTTP for a loopback
+        // host, TLS otherwise.
+        bool? useSSL = null;
         if (_options.TryGetValue(QuackAdbcDriver.UseSSLParameter, out string? useSSLText) &&
             !string.IsNullOrEmpty(useSSLText))
         {
-            if (!bool.TryParse(useSSLText, out useSSL))
+            if (!bool.TryParse(useSSLText, out bool parsedUseSSL))
             {
                 throw AdbcException.NotImplemented(
                     $"Invalid '{QuackAdbcDriver.UseSSLParameter}' value '{useSSLText}'; expected 'true' or 'false'.");
             }
+            useSSL = parsedUseSSL;
         }
 
         // ADBC's contract is synchronous; sync-over-async is acceptable here
