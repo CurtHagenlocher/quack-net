@@ -207,8 +207,39 @@ def run_smoke_test(dll: Path, duckdb_exe: Path) -> None:
                 worker.join(30)
                 assert not worker.is_alive(), "cancel did not stop the query"
                 assert failure and "CANCELLED" in str(failure[0]).upper(), failure
+            # The DB-API runs with autocommit off: the cancel aborted the transaction.
+            conn.rollback()
             assert rows("SELECT 42") == [(42,)]
             print("[smoke] ADBC 1.1 (version, GetOption, catalog/schema, ExecuteSchema, statistics, cancel) -> ok", flush=True)
+
+        # 7) Transactions, through a second connection opened without an
+        # entrypoint (AdbcDriverInit, the driver manager's default).
+        with adbc_driver_manager.dbapi.connect(
+            driver=str(dll),
+            db_kwargs={"uri": f"quack:127.0.0.1:{port}", "token": token},
+        ) as writer, adbc_driver_manager.dbapi.connect(
+            driver=str(dll),
+            db_kwargs={"uri": f"quack:127.0.0.1:{port}", "token": token},
+            autocommit=True,
+        ) as reader:
+            def count() -> int:
+                with reader.cursor() as cur:
+                    cur.execute("SELECT count(*) FROM txn_smoke")
+                    return cur.fetchone()[0]
+
+            with writer.cursor() as cur:
+                cur.execute("CREATE TABLE txn_smoke (i INTEGER)")
+            writer.commit()
+            with writer.cursor() as cur:
+                cur.execute("INSERT INTO txn_smoke VALUES (1), (2)")
+            assert count() == 0
+            writer.commit()
+            assert count() == 2
+            with writer.cursor() as cur:
+                cur.execute("INSERT INTO txn_smoke VALUES (3)")
+            writer.rollback()
+            assert count() == 2
+            print("[smoke] AdbcDriverInit + commit/rollback -> ok", flush=True)
 
         print("[smoke] ALL CHECKS PASSED", flush=True)
     finally:

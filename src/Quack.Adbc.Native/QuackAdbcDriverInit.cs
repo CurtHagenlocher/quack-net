@@ -29,8 +29,17 @@ internal static class Entrypoint
     private const int AdbcVersion_1_0_0 = 1_000_000;
     private const int AdbcVersion_1_1_0 = 1_001_000;
 
+    // ADBC's default entry point name: a driver manager tries it when no
+    // entrypoint is given (driver manifests rely on it).
+    [UnmanagedCallersOnly(EntryPoint = "AdbcDriverInit", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static unsafe AdbcStatusCode AdbcDriverInit(int version, CAdbcDriver* driver, CAdbcError* error)
+        => Init(version, driver, error);
+
     [UnmanagedCallersOnly(EntryPoint = "QuackAdbcDriverInit", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static unsafe AdbcStatusCode QuackAdbcDriverInit(int version, CAdbcDriver* driver, CAdbcError* error)
+        => Init(version, driver, error);
+
+    private static unsafe AdbcStatusCode Init(int version, CAdbcDriver* driver, CAdbcError* error)
     {
         try
         {

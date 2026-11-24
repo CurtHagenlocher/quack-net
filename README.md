@@ -192,9 +192,21 @@ driver manager):
 - `GetStatistics` returns a row count per table (`adbc.statistic.row_count`)
   from DuckDB's estimate, marked approximate; there are no driver-specific
   statistics.
+- Transactions: with `adbc.connection.autocommit` = `false` a transaction is
+  open on the quack session (`BEGIN`), `Commit` / `Rollback` end it and begin
+  the next, and turning autocommit back on commits. Every statement on the
+  connection takes part, bulk ingest included. While a transaction is open,
+  `reconnect_on_session_loss` does not re-establish a lost session (the next
+  statement would silently run outside the transaction): the call fails, and
+  `Rollback` starts over on a new session. Python's DB-API turns autocommit
+  off by default, so call `commit()`; after a failed or cancelled statement,
+  DuckDB needs a `rollback()`.
 
-Not implemented: transactions (Commit, Rollback, turning autocommit off),
-partitioned results, prepared statements with parameters, and error details.
+The library also exports `AdbcDriverInit`, the entry point a driver manager
+uses when none is given.
+
+Not implemented: partitioned results, prepared statements with parameters,
+isolation levels and read-only connections, and error details.
 
 ## Using the native library from Python (or any ADBC C-API consumer)
 

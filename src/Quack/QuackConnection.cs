@@ -597,7 +597,7 @@ public sealed class QuackConnection : IAsyncDisposable
         {
             return await QueryCancellation.SendAsync<TResponse>(_transport, buildRequest(idAtSend), queryUuid, cancellationToken, queryStarted: false).ConfigureAwait(false);
         }
-        catch (QuackSessionExpiredException) when (_autoReconnect)
+        catch (QuackSessionExpiredException) when (_autoReconnect && !HoldsSessionState)
         {
             await EnsureReconnectedAsync(genAtSend, cancellationToken).ConfigureAwait(false);
             // Second attempt uses the post-reconnect id. If it fails, throw —
@@ -605,6 +605,22 @@ public sealed class QuackConnection : IAsyncDisposable
             return await QueryCancellation.SendAsync<TResponse>(_transport, buildRequest(ConnectionId), queryUuid, cancellationToken, queryStarted: false).ConfigureAwait(false);
         }
     }
+
+    // Set while the session carries state a new session would not have (an
+    // open transaction): a lost session then fails the call instead of being
+    // re-established behind the caller's back.
+    internal bool HoldsSessionState
+    {
+        get => Volatile.Read(ref _holdsSessionState);
+        set => Volatile.Write(ref _holdsSessionState, value);
+    }
+
+    private bool _holdsSessionState;
+
+    // Re-establishes the session now (for a caller that held session state and
+    // has dealt with its loss).
+    internal Task ReconnectAsync(CancellationToken cancellationToken = default)
+        => EnsureReconnectedAsync(SessionGeneration, cancellationToken);
 
     private async Task EnsureReconnectedAsync(int generationAtFailure, CancellationToken cancellationToken)
     {

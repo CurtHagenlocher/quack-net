@@ -14,10 +14,18 @@ internal sealed class QuackAdbcConnection : AdbcConnection
     // ADBC's standard connection options (ADBC 1.1).
     internal const string CurrentCatalogOption = "adbc.connection.catalog";
     internal const string CurrentDbSchemaOption = "adbc.connection.db_schema";
+    internal const string AutoCommitOption = "adbc.connection.autocommit";
 
     private readonly QuackConnection _connection;
     private readonly object _operationsLock = new();
     private readonly HashSet<QuackOperation> _operations = [];
+    // ADBC's default is autocommit. With it off, a transaction is always open
+    // on the session (BEGIN after every Commit / Rollback).
+    private bool _autoCommit = true;
+    // The quack session the open transaction belongs to. While one is open the
+    // session is not re-established automatically (reconnect_on_session_loss),
+    // since a new session would have silently lost it.
+    private int _transactionSession;
     private bool _disposed;
 
     public QuackAdbcConnection(QuackConnection connection, TimeSpan? defaultCommandTimeout = null)
@@ -35,6 +43,12 @@ internal sealed class QuackAdbcConnection : AdbcConnection
 
     internal QuackOperation BeginOperation(object? owner, TimeSpan? timeout)
     {
+        if (!_autoCommit && _connection.SessionGeneration != _transactionSession)
+        {
+            throw new AdbcException(
+                "The quack session was re-established during the transaction, which lost it; call Rollback to start a new one.",
+                AdbcStatusCode.InvalidState);
+        }
         QuackOperation operation = new(this, owner, timeout);
         lock (_operationsLock)
         {
@@ -75,6 +89,7 @@ internal sealed class QuackAdbcConnection : AdbcConnection
     {
         CurrentCatalogOption => CurrentCatalog!,
         CurrentDbSchemaOption => CurrentDbSchema!,
+        AutoCommitOption => _autoCommit ? "true" : "false",
         _ => base.GetOption(key),
     };
 
@@ -88,8 +103,118 @@ internal sealed class QuackAdbcConnection : AdbcConnection
             case CurrentDbSchemaOption:
                 CurrentDbSchema = value;
                 return;
+            case AutoCommitOption:
+                AutoCommit = value switch
+                {
+                    "true" => true,
+                    "false" => false,
+                    _ => throw new AdbcException($"Invalid value '{value}' for {AutoCommitOption}; expected 'true' or 'false'.", AdbcStatusCode.InvalidArgument),
+                };
+                return;
         }
         base.SetOption(key, value);
+    }
+
+    // Transactions are the session's own: BEGIN / COMMIT / ROLLBACK, so every
+    // statement on the connection, ingest included, takes part. Turning
+    // autocommit back on commits the open transaction.
+    public override bool AutoCommit
+    {
+        get => _autoCommit;
+        set
+        {
+            ThrowIfDisposed();
+            if (value == _autoCommit)
+            {
+                return;
+            }
+            if (value)
+            {
+                RunTransactionCommand("COMMIT");
+                _autoCommit = true;
+                _connection.HoldsSessionState = false;
+            }
+            else
+            {
+                BeginTransaction();
+                _autoCommit = false;
+                _connection.HoldsSessionState = true;
+            }
+        }
+    }
+
+    public override void Commit()
+    {
+        ThrowIfDisposed();
+        RequireTransaction("Commit");
+        try
+        {
+            RunTransactionCommand("COMMIT");
+        }
+        catch (QuackSessionExpiredException) when (_connection.AutoReconnect)
+        {
+            RecoverSession();
+            throw new AdbcException(
+                "The quack session was lost during the transaction, and its changes with it; a new transaction has begun.",
+                AdbcStatusCode.InvalidState);
+        }
+        BeginTransaction();
+    }
+
+    // A transaction whose session was lost is gone already: Rollback then
+    // re-establishes the session (with reconnect_on_session_loss) and begins
+    // the next one.
+    public override void Rollback()
+    {
+        ThrowIfDisposed();
+        RequireTransaction("Rollback");
+        try
+        {
+            RunTransactionCommand("ROLLBACK");
+        }
+        catch (QuackSessionExpiredException) when (_connection.AutoReconnect)
+        {
+            RecoverSession();
+            return;
+        }
+        BeginTransaction();
+    }
+
+    private void RecoverSession()
+    {
+        _connection.ReconnectAsync().GetAwaiter().GetResult();
+        BeginTransaction();
+    }
+
+    private void RequireTransaction(string operation)
+    {
+        if (_autoCommit)
+        {
+            throw new AdbcException($"{operation} needs autocommit turned off ({AutoCommitOption} = false).", AdbcStatusCode.InvalidState);
+        }
+    }
+
+    private void BeginTransaction()
+    {
+        int session = _connection.SessionGeneration;
+        RunTransactionCommand("BEGIN TRANSACTION");
+        _transactionSession = session;
+    }
+
+    // Outside the operation guard: these are what end or replace a transaction
+    // a reconnect has lost.
+    private void RunTransactionCommand(string sql)
+    {
+        bool autoCommit = _autoCommit;
+        _autoCommit = true;
+        try
+        {
+            _ = RunQuery(sql, out _, sql);
+        }
+        finally
+        {
+            _autoCommit = autoCommit;
+        }
     }
 
     // The session's current catalog and schema: current_database() and
