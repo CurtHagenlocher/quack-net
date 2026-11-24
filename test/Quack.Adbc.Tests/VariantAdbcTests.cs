@@ -82,6 +82,66 @@ public class VariantAdbcTests : IClassFixture<QuackServerFixture>
         Assert.Equal(VariantValue.FromDecimal4(2.5m), fields["o"].AsObject()["p"]);
     }
 
+    // Ingest: arrow.parquet.variant into a VARIANT column, checked on the server.
+    [Fact]
+    public async Task Ingest_IsTheSameValueOnTheServer()
+    {
+        using AdbcConnection conn = OpenConnection();
+        string table = "vai_" + Guid.NewGuid().ToString("N")[..8];
+        Execute(conn, $"CREATE TABLE {table} (i INTEGER, v VARIANT)");
+
+        (VariantValue? Value, string Sql)[] rows =
+        [
+            (VariantValue.FromInt32(-70000), "(-70000)::INTEGER"),
+            (VariantValue.FromDecimal4(12.34m), "12.34::DECIMAL(4,2)"),
+            (VariantValue.FromDecimal8(-1234567.89m), "(-1234567.89)::DECIMAL(9,2)"),
+            (VariantValue.FromDecimal16(SqlDecimal.Parse("12345678901234567890123.45678")), "12345678901234567890123.45678::DECIMAL(38,5)"),
+            (VariantValue.FromString("hi ü"), "'hi ü'"),
+            (VariantValue.FromBinary([0x00, 0xFF]), "'\\x00\\xFF'::BLOB"),
+            (VariantValue.FromUuid(Guid.Parse("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11")), "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::UUID"),
+            (VariantValue.FromDate(19724), "DATE '2024-01-02'"),
+            (VariantValue.FromTimestamp(1704164645123456), "'2024-01-02 03:04:05.123456+00'::TIMESTAMPTZ"),
+            (VariantValue.FromTimestampNtz(1704164645123456), "TIMESTAMP '2024-01-02 03:04:05.123456'"),
+            (VariantValue.FromTimeNtz(3723456789), "TIME '01:02:03.456789'"),
+            (VariantValue.FromObject(new Dictionary<string, VariantValue>
+            {
+                ["b"] = VariantValue.FromInt32(1),
+                ["a"] = VariantValue.FromArray(VariantValue.FromString("x"), VariantValue.Null),
+            }), "{'a': ['x'::VARIANT, NULL::VARIANT], 'b': 1}"),
+            (null, "NULL"),
+        ];
+
+        VariantArray.Builder variants = new();
+        Int32Array.Builder ids = new();
+        for (int i = 0; i < rows.Length; i++)
+        {
+            ids.Append(i);
+            variants.Append(rows[i].Value);
+        }
+        Schema schema = new Schema.Builder()
+            .Field(new Field("i", Apache.Arrow.Types.Int32Type.Default, true))
+            .Field(new Field("v", VariantType.Default, true))
+            .Build();
+        using RecordBatch batch = new(schema, [ids.Build(), variants.Build()], rows.Length);
+        using (AdbcStatement ingest = conn.CreateStatement())
+        {
+            ingest.SqlQuery = table;
+            ingest.Bind(batch, schema);
+            Assert.Equal(rows.Length, ingest.ExecuteUpdate().AffectedRows);
+        }
+
+        for (int i = 0; i < rows.Length; i++)
+        {
+            using AdbcStatement check = conn.CreateStatement();
+            check.SqlQuery = $"SELECT (v IS NOT DISTINCT FROM ({rows[i].Sql})::VARIANT) AND (variant_typeof(v) IS NOT DISTINCT FROM variant_typeof(({rows[i].Sql})::VARIANT)) FROM {table} WHERE i = {i}";
+            QueryResult result = check.ExecuteQuery();
+            using IArrowArrayStream stream = result.Stream!;
+            RecordBatch? b = await stream.ReadNextRecordBatchAsync();
+            Assert.True(((BooleanArray)b!.Column(0)).GetValue(0), $"row {i}: {rows[i].Sql}");
+        }
+        Execute(conn, $"DROP TABLE {table}");
+    }
+
     [Theory]
     [InlineData("INTERVAL '1 day'")]
     [InlineData("'10110'::BIT")]

@@ -11,6 +11,9 @@ namespace Quack.IntegrationTests;
 // (VectorType SHREDDED: typed columns plus an untyped overlay). DuckDB emits
 // shredded vectors when it casts a column to VARIANT and when it scans a
 // VARIANT column that a checkpoint shredded (row groups >= 30000 rows).
+// The variant test classes share one collection so they never run in parallel:
+// they measure VariantDecoder.ShreddedVectorsDecoded, a process-wide counter.
+[Collection(nameof(VariantTests))]
 public class VariantTests : IClassFixture<QuackServerFixture>
 {
     private readonly QuackServerFixture _server;

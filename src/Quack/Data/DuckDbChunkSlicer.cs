@@ -52,6 +52,14 @@ internal static class DuckDbChunkSlicer
                     Validity = validity,
                     Values = v.Values.AsSpan(start, count).ToArray(),
                 };
+            case VariantColumn v:
+                return new VariantColumn
+                {
+                    Type = v.Type,
+                    Count = count,
+                    Validity = validity,
+                    Values = v.Values.AsSpan(start, count).ToArray(),
+                };
             case StructColumn s:
                 return new StructColumn
                 {

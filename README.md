@@ -76,8 +76,15 @@ Through ADBC a VARIANT column is `arrow.parquet.variant` (Apache.Arrow's
 unsigned and 128-bit integers widen to the next signed type (UINT32 and
 wider to INT64 when the value fits), and INTERVAL, BIGNUM, BITSTRING,
 TIMESTAMP_S / _MS, TIME_TZ, TIME_NS, TIMESTAMP_NS WITH TIME ZONE and GEOMETRY
-values are refused, as DuckDB refuses them. Sending VARIANT values to the
-server (append / ingest) is not supported yet.
+values are refused, as DuckDB refuses them.
+
+VARIANT values can also be sent: `AppendAsync` with a `VariantColumn`
+(type `LogicalType.Variant`) and ADBC ingest of `arrow.parquet.variant`. The
+client writes DuckDB's canonical layout (values in pre-order, object fields
+sorted by key, as DuckDB's own builder writes them); a root variant null is
+sent as SQL NULL. Ingested Parquet variant values map like DuckDB's Parquet
+reader maps them (TIMESTAMP with time zone to TIMESTAMPTZ, DECIMAL4/8 to the
+width of the value's digits, DECIMAL16 to width 38).
 
 ## Using `Quack` from .NET
 

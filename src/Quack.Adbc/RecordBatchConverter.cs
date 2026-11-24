@@ -81,6 +81,7 @@ internal static class RecordBatchConverter
         FixedSizeListType fsl => new LogicalType(LogicalTypeId.Array,
             new ArrayTypeInfo { ChildType = MapType(fsl.ValueDataType), Size = (uint)fsl.ListSize }),
         MapType mt => BuildMapLogicalType(mt),
+        VariantType => LogicalType.Variant,
         StructType st => new LogicalType(LogicalTypeId.Struct, BuildStructTypeInfo(st)),
         DictionaryType dt => BuildEnumLogicalType(dt),
         _ => throw new NotSupportedException(
@@ -138,6 +139,7 @@ internal static class RecordBatchConverter
         ValidityMask validity = ExtractValidity(array, rowCount);
         return array switch
         {
+            VariantArray v => VariantArrowConverter.ToColumn(v, targetType, rowCount, validity),
             Int8Array a => Fixed(a.Data, targetType, rowCount, sizeof(sbyte), validity),
             Int16Array a => Fixed(a.Data, targetType, rowCount, sizeof(short), validity),
             Int32Array a => Fixed(a.Data, targetType, rowCount, sizeof(int), validity),

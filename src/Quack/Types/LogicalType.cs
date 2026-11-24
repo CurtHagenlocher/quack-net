@@ -23,6 +23,40 @@ public sealed class LogicalType : IEquatable<LogicalType>
         TypeInfo = typeInfo;
     }
 
+    // VARIANT with its canonical type info: STRUCT(keys VARCHAR[], children
+    // STRUCT(keys_index UINTEGER, values_index UINTEGER)[], values STRUCT(type_id
+    // UTINYINT, byte_offset UINTEGER)[], data BLOB), as LogicalType::VARIANT().
+    public static LogicalType Variant { get; } = new(LogicalTypeId.Variant, new StructTypeInfo
+    {
+        ChildTypes =
+        [
+            new("keys", new LogicalType(LogicalTypeId.List, new ListTypeInfo { ChildType = new LogicalType(LogicalTypeId.Varchar) })),
+            new("children", new LogicalType(LogicalTypeId.List, new ListTypeInfo
+            {
+                ChildType = new LogicalType(LogicalTypeId.Struct, new StructTypeInfo
+                {
+                    ChildTypes =
+                    [
+                        new("keys_index", new LogicalType(LogicalTypeId.UInteger)),
+                        new("values_index", new LogicalType(LogicalTypeId.UInteger)),
+                    ],
+                }),
+            })),
+            new("values", new LogicalType(LogicalTypeId.List, new ListTypeInfo
+            {
+                ChildType = new LogicalType(LogicalTypeId.Struct, new StructTypeInfo
+                {
+                    ChildTypes =
+                    [
+                        new("type_id", new LogicalType(LogicalTypeId.UTinyInt)),
+                        new("byte_offset", new LogicalType(LogicalTypeId.UInteger)),
+                    ],
+                }),
+            })),
+            new("data", new LogicalType(LogicalTypeId.Blob)),
+        ],
+    });
+
     public PhysicalType GetPhysicalType()
     {
         switch (Id)

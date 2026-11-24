@@ -21,6 +21,11 @@ internal static class VectorWriter
     // columns may leave them valid, so the effective mask is child AND parent.
     private static void Write(BinarySerializer s, DuckDbColumn column, int count, ValidityMask parentValidity)
     {
+        if (column is VariantColumn variant)
+        {
+            // A VARIANT travels in its canonical STRUCT layout.
+            column = VariantEncoder.ToStruct(variant);
+        }
         if (column.Count != count)
         {
             throw new ArgumentException(
@@ -67,8 +72,6 @@ internal static class VectorWriter
             case ArrayColumn arrayCol:
                 WriteArrayColumn(s, arrayCol, count);
                 break;
-            case VariantColumn:
-                throw new NotSupportedException("Sending VARIANT values to the server is not supported yet.");
             default:
                 throw new SerializationException(
                     $"VectorWriter does not support column kind '{column.GetType().Name}'.");
