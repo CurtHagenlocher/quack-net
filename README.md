@@ -235,6 +235,57 @@ pwsh scripts/publish-native.ps1 -Runtime linux-arm64
 python scripts/smoke_test_python.py
 ```
 
+## Planned: a compact column layer (not done)
+
+Measured on DuckDB 2.0.1, 1M rows, client side only (decoding captured
+responses), per row:
+
+| column | on the wire | wire -> columns | columns -> Arrow |
+|---|---|---|---|
+| VARCHAR, short (`'x' \|\| i`) | 11 B | 24-35 ns, 24 B allocated | 24-55 ns, 11 B |
+| VARCHAR, 32 B (`md5`) | 36 B | 26-35 ns, 24 B | 37-51 ns, 36 B |
+| LIST(BIGINT) `[i, i + 1]` | 25 B | 24-33 ns, 16 B | 3-6 ns, 8 B |
+| BIGINT + 2 VARCHAR + LIST | 72 B | 88-127 ns, 72 B | 67-83 ns, 56 B |
+
+The mixed query takes about 500 ns per row end to end through ADBC, so
+decoding is about a third of it. Most of that is strings:
+
+- `VarBytesColumn` holds a `ReadOnlyMemory<byte>?` per value: 24 bytes to
+  point at a 1-7 byte key or a short string. `ListColumn` holds a
+  `(ulong, ulong)` (16 bytes) per row.
+- `ArrowConverter` copies every string into a new buffer, value by value,
+  although DuckDB sends them contiguous (field 109) and Arrow's string layout
+  is the same bytes plus offsets.
+
+What to do:
+
+1. Read VARCHAR/BLOB vectors into int32 offsets (a prefix sum over DuckDB's
+   length data) plus the contiguous byte data, and LIST entries as 32-bit
+   offset and length.
+2. Build Arrow string, binary and list arrays from those offsets and a slice
+   of the response buffer, without copying the bytes.
+3. Keep `VarBytesColumn.Values` and `ListColumn.Entries` as they are, built on
+   first access from the compact form (as `VariantColumn.Values` is), so the
+   public API does not change.
+4. Measure end to end again; the estimate is about half of the decode time.
+
+Ownership rules this relies on:
+
+- The response is a plain `byte[]` owned by the GC. Columns and Arrow buffers
+  slice it; a batch keeps its response alive, and the C Data Interface export
+  pins it until the consumer releases the batch. The ADBC path already does
+  this for fixed-size columns and validity, so strings add no new kind of
+  sharing.
+- No pooling of response buffers while slices are handed out: a buffer
+  returned to an `ArrayPool` with slices still in use is a use after free.
+  Pooling would need an explicit, reference-counted owner that every column
+  and Arrow buffer retains and releases.
+- A small batch kept by a consumer keeps its whole response (up to 32 MiB)
+  alive. If that matters, copy columns that are a small part of the response.
+- Slices sit at arbitrary byte offsets. Offsets are built in new, aligned
+  arrays; check fixed-size columns, which are sliced today, against a strict
+  consumer (`pyarrow` `validate(full=True)`).
+
 ## Repository layout
 
 ```
