@@ -69,14 +69,26 @@ variant type is decoded losslessly, from both forms DuckDB 2.0 sends: the
 canonical layout and SHREDDED vectors (typed columns plus an untyped
 overlay; DuckDB sends them for a column cast to VARIANT and for VARIANT
 columns a checkpoint shredded). Object fields keep the variant's order; for a
-shredded value that is the typed fields first, then the leftover ones.
+shredded value that is the typed fields first, then the leftover ones. The
+values are decoded on first access to `VariantColumn.Values`; until then the
+column holds the received vector (and with it the response buffer).
 
 Through ADBC a VARIANT column is `arrow.parquet.variant` (Apache.Arrow's
-`VariantArray`), with the type mapping of DuckDB's own Arrow export:
+`VariantArray`) holding the bytes DuckDB's own Arrow export writes (checked
+against `variant_to_parquet_variant`), converted straight from the received
+vector without building `DuckDbVariant` values. The type mapping is DuckDB's:
 unsigned and 128-bit integers widen to the next signed type (UINT32 and
 wider to INT64 when the value fits), and INTERVAL, BIGNUM, BITSTRING,
 TIMESTAMP_S / _MS, TIME_TZ, TIME_NS, TIMESTAMP_NS WITH TIME ZONE and GEOMETRY
 values are refused, as DuckDB refuses them.
+
+The client writes and reads the Parquet Variant bytes itself: Apache.Arrow
+23.0.0's `VariantBuilder` and `VariantReader` swap the field-id and
+field-offset sizes of an object header (fixed after 23.0.0,
+apache/arrow-dotnet#421). With 23.0.0, `VariantArray.GetVariantValue` fails
+on an object whose field values take more than 255 bytes, for these values
+and for DuckDB's or Spark's; values Apache.Arrow 23.0.0 encoded such objects
+in are misread by everyone else, this client included.
 
 VARIANT values can also be sent: `AppendAsync` with a `VariantColumn`
 (type `LogicalType.Variant`) and ADBC ingest of `arrow.parquet.variant`. The
@@ -84,7 +96,9 @@ client writes DuckDB's canonical layout (values in pre-order, object fields
 sorted by key, as DuckDB's own builder writes them); a root variant null is
 sent as SQL NULL. Ingested Parquet variant values map like DuckDB's Parquet
 reader maps them (TIMESTAMP with time zone to TIMESTAMPTZ, DECIMAL4/8 to the
-width of the value's digits, DECIMAL16 to width 38).
+width of the value's digits, DECIMAL16 to width 38). A shredded
+`arrow.parquet.variant` input (with `typed_value`) is merged by Apache.Arrow,
+so its leftover object values are read with 23.0.0's header layout.
 
 ## Using `Quack` from .NET
 

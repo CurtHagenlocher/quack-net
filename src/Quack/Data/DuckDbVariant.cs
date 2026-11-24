@@ -1,6 +1,9 @@
 // Copyright (c) Curt Hagenlocher. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See LICENSE in the project root for license information.
 
+using System.Diagnostics.CodeAnalysis;
+using Quack.Types;
+
 namespace Quack.Data;
 
 // Mirror of duckdb::VariantLogicalType (src/include/duckdb/common/types/variant.hpp, DuckDB 2.0).
@@ -127,7 +130,42 @@ public sealed class DuckDbVariant : IEquatable<DuckDbVariant>
 }
 
 // A VARIANT column: one decoded value per row (null = SQL NULL).
+//
+// A column read from the wire keeps the DuckDB vector it came from (Source)
+// and decodes Values on first access, so a consumer that converts the vector
+// directly (the ADBC driver) never builds the value tree. The vector aliases
+// the response buffer, which therefore lives as long as the column.
 public sealed class VariantColumn : DuckDbColumn
 {
-    public required DuckDbVariant?[] Values { get; init; }
+    private DuckDbVariant?[]? _values;
+
+    public VariantColumn()
+    {
+    }
+
+    // Leaves Values to the lazy decode in its getter.
+#pragma warning disable CS8618
+    [SetsRequiredMembers]
+    internal VariantColumn(LogicalType type, int count, ValidityMask validity, StructColumn source, bool sourceIsShredded)
+    {
+        Type = type;
+        Count = count;
+        Validity = validity;
+        Source = source;
+        SourceIsShredded = sourceIsShredded;
+    }
+#pragma warning restore CS8618
+
+    public required DuckDbVariant?[] Values
+    {
+        get => _values ?? LazyInitializer.EnsureInitialized(ref _values, () => VariantDecoder.DecodeValues(this));
+        init => _values = value;
+    }
+
+    // The vector as read: the canonical STRUCT(keys, children, values, data),
+    // or for VectorType SHREDDED the STRUCT(unshredded, shredded). Null when
+    // the column was built from Values.
+    internal StructColumn? Source { get; }
+
+    internal bool SourceIsShredded { get; }
 }

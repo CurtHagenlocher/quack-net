@@ -29,54 +29,80 @@ namespace Quack.Data;
 // the leftover fields. Port of duckdb's VariantIterator / VariantNode.
 internal static class VariantDecoder
 {
+    // Reading checks the vector's shape; the values decode on first access to
+    // VariantColumn.Values (DecodeValues).
     public static VariantColumn FromUnshredded(StructColumn variant, LogicalType type)
     {
-        Unshredded u = new(variant);
-        DuckDbVariant?[] values = new DuckDbVariant?[variant.Count];
-        for (int row = 0; row < variant.Count; row++)
-        {
-            values[row] = variant.IsNull(row) ? null : u.Decode(row, 0);
-        }
-        return new VariantColumn { Type = type, Count = variant.Count, Validity = variant.Validity, Values = values };
+        _ = new Unshredded(variant);
+        return new VariantColumn(type, variant.Count, variant.Validity, variant, sourceIsShredded: false);
     }
 
-    // How many shredded VARIANT vectors were decoded in this process (a test hook:
+    // How many shredded VARIANT vectors were read in this process (a test hook:
     // proves that a test read the shredded path).
     internal static long ShreddedVectorsDecoded;
 
     public static VariantColumn FromShredded(StructColumn shreddedVector, LogicalType type)
     {
         Interlocked.Increment(ref ShreddedVectorsDecoded);
-        if (shreddedVector.Fields.Length != 2 || shreddedVector.Fields[0] is not StructColumn unshreddedPart)
-        {
-            throw new SerializationException("A shredded VARIANT vector must be STRUCT(unshredded, shredded).");
-        }
-        Unshredded u = new(unshreddedPart);
+        Unshredded u = new(UnshreddedPart(shreddedVector));
         DuckDbColumn shredded = shreddedVector.Fields[1];
         int count = shreddedVector.Count;
-        DuckDbVariant?[] values = new DuckDbVariant?[count];
+        // A row whose root is missing or VARIANT_NULL is a SQL NULL.
         byte[] validity = new byte[ValidityMask.RequiredByteCount(count)];
         for (int row = 0; row < count; row++)
         {
-            DuckDbVariant? value = null;
-            // The shredded component's own validity is the row validity.
-            if (shredded.Validity.IsValid(row))
+            if (!shredded.Validity.IsValid(row))
             {
-                Node root = Resolve(u, shredded, row, row);
-                // A root that is missing or VARIANT_NULL is a SQL NULL.
-                value = root.Kind is NodeKind.Missing ? null : Materialize(u, root);
-                if (value is { Type: DuckDbVariantType.Null })
-                {
-                    value = null;
-                }
+                continue;
             }
-            values[row] = value;
-            if (value is not null)
+            Node root = Resolve(u, shredded, row, row);
+            bool isValue = root.Kind switch
+            {
+                NodeKind.Shredded => true,
+                NodeKind.Unshredded => u.TypeOf(row, root.ValueIndex) != DuckDbVariantType.Null,
+                _ => false,
+            };
+            if (isValue)
             {
                 validity[row >> 3] |= (byte)(1 << (row & 7));
             }
         }
-        return new VariantColumn { Type = type, Count = count, Validity = new ValidityMask(validity), Values = values };
+        return new VariantColumn(type, count, new ValidityMask(validity), shreddedVector, sourceIsShredded: true);
+    }
+
+    internal static DuckDbVariant?[] DecodeValues(VariantColumn column)
+    {
+        StructColumn source = column.Source ?? throw new InvalidOperationException("The VARIANT column has no source vector.");
+        int count = column.Count;
+        DuckDbVariant?[] values = new DuckDbVariant?[count];
+        if (!column.SourceIsShredded)
+        {
+            Unshredded u = new(source);
+            for (int row = 0; row < count; row++)
+            {
+                values[row] = source.IsNull(row) ? null : u.Decode(row, 0);
+            }
+            return values;
+        }
+        Unshredded parts = new(UnshreddedPart(source));
+        DuckDbColumn shredded = source.Fields[1];
+        for (int row = 0; row < count; row++)
+        {
+            if (column.Validity.IsValid(row))
+            {
+                values[row] = Materialize(parts, Resolve(parts, shredded, row, row));
+            }
+        }
+        return values;
+    }
+
+    private static StructColumn UnshreddedPart(StructColumn shreddedVector)
+    {
+        if (shreddedVector.Fields.Length != 2 || shreddedVector.Fields[0] is not StructColumn unshreddedPart)
+        {
+            throw new SerializationException("A shredded VARIANT vector must be STRUCT(unshredded, shredded).");
+        }
+        return unshreddedPart;
     }
 
     // ---------------------------------------------------------------- shredded
@@ -340,6 +366,9 @@ internal static class VariantDecoder
             _byteOffsets = (FixedSizeColumn)values.Fields[1];
             _data = (VarBytesColumn)variant.Fields[3];
         }
+
+        public DuckDbVariantType TypeOf(int row, int valueIndex)
+            => (DuckDbVariantType)_typeIds.GetBytes(checked((int)_values.Entries[row].Offset + valueIndex))[0];
 
         public DuckDbVariant Decode(int row, int valueIndex)
         {
