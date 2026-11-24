@@ -1,0 +1,6 @@
+# The ADBC validation framework and what the suite pins with it.
+adbc-drivers-validation @ git+https://github.com/adbc-drivers/validation@e4c18a5ccf74dec1efd5b1b11fc6fedd35dc349d
+adbc-driver-manager==1.13.0
+duckdb==2.0.1
+pyarrow==26.0.1
+pytest==9.2.0

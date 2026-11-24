@@ -1,0 +1,47 @@
+// Copyright (c) 2026 ADBC Drivers Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//         http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// part: metadata
+
+[setup]
+drop = "test_timetz"
+
+[tags]
+sql-type-name = "TIME WITH TIME ZONE"
+
+// part: setup_query
+
+CREATE TABLE test_timetz (idx INTEGER, res TIME WITH TIME ZONE);
+INSERT INTO test_timetz VALUES
+    (0, '00:00:00-12'),
+    (1, '23:59:59.999999+14'),
+    (2, '12:00:00+05'),
+    (3, '12:00:00-05'),
+    (4, NULL);
+
+// part: query
+
+SELECT res FROM test_timetz ORDER BY idx
+
+// part: expected_schema
+
+{"format":"+s","children":[{"name":"res","format":"ttu","flags":["nullable"]}]}
+
+// part: expected
+
+{"res": 0}
+{"res": 86399999999}
+{"res": 43200000000}
+{"res": 43200000000}
+{"res": null}

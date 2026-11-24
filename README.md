@@ -370,7 +370,15 @@ pwsh scripts/publish-native.ps1 -Runtime linux-arm64
 
 # End-to-end smoke test (spawns duckdb + loads native lib from Python)
 python scripts/smoke_test_python.py
+
+# The ADBC validation suite against the published native library
+pip install -r validation/requirements.txt
+python validation/run.py --duckdb /path/to/duckdb
 ```
+
+[validation/README.md](validation/README.md) has the details of the
+validation suite; `.github/workflows/validation.yml` runs it, with the
+integration and ADBC tests, against a stock DuckDB 2.0.1 CLI.
 
 ## Planned: a compact column layer (not done)
 

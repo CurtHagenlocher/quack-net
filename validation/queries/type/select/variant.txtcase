@@ -1,0 +1,91 @@
+// Copyright (c) 2026 ADBC Drivers Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//         http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// part: metadata
+
+[setup]
+drop = "test_variant"
+
+[tags]
+sql-type-name = "VARIANT"
+
+// part: setup_query
+
+CREATE TABLE test_variant (idx INTEGER, res VARIANT);
+INSERT INTO test_variant VALUES
+    (0, NULL),
+    (1, true),
+    (2, ''),
+    (3, repeat('雪',40)),
+    (4, -128::INTEGER),
+    (5, [1,NULL,2]),
+    (6, {'a':[], 'b':{'x':42}}),
+    (7, [{'x':1,'y':2},{'x':3,'y':4}]),
+    (8, {'a':[1,NULL], 'b': '雪'}),
+    (9, '00112233-4455-6677-8899-aabbccddeeff'::UUID),
+    (10, -123.45::DECIMAL(6,2)),
+    (11, 255::UTINYINT),
+    (12, 'x'::BLOB);
+
+// part: query
+
+SELECT res FROM test_variant ORDER BY idx
+
+// part: expected_schema
+
+{
+  "format": "+s",
+  "children": [
+    {
+      "name": "res",
+      "format": "+s",
+      "flags": [
+        "nullable"
+      ],
+      "metadata": {
+        "ARROW:extension:name": "arrow.parquet.variant",
+        "ARROW:extension:metadata": ""
+      },
+      "children": [
+        {
+          "name": "metadata",
+          "format": "z"
+        },
+        {
+          "name": "value",
+          "format": "z",
+          "flags": [
+            "nullable"
+          ]
+        }
+      ]
+    }
+  ]
+}
+
+// part: expected
+
+{"res": null}
+{"res": {"metadata": "AQAA", "value": "BA=="}}
+{"res": {"metadata": "AQAA", "value": "AQ=="}}
+{"res": {"metadata": "AQAA", "value": "QHgAAADpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6rpm6o="}}
+{"res": {"metadata": "AQAA", "value": "FID///8="}}
+{"res": {"metadata": "AQAA", "value": "AwMABQYLFAEAAAAAFAIAAAA="}}
+{"res": {"metadata": "AQMAAQIDYWJ4", "value": "AgIAAQADDQMAAAIBAgAFFCoAAAA="}}
+{"res": {"metadata": "AQQAAQIDBHh5eHk=", "value": "AwIAESICAgABAAUKFAEAAAAUAgAAAAICAgMABQoUAwAAABQEAAAA"}}
+{"res": {"metadata": "AQIAAQJhYg==", "value": "AgIAAQALDwMCAAUGFAEAAAAADembqg=="}}
+{"res": {"metadata": "AQAA", "value": "UAARIjNEVWZ3iJmqu8zd7v8="}}
+{"res": {"metadata": "AQAA", "value": "IALHz///"}}
+{"res": {"metadata": "AQAA", "value": "EP8A"}}
+{"res": {"metadata": "AQAA", "value": "PAEAAAB4"}}
