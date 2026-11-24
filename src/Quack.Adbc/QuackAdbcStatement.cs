@@ -60,6 +60,22 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         _boundStream = stream;
     }
 
+    // A SQL statement ends ingest mode: the ingest options are cleared (bound
+    // data is kept, for the older SqlQuery-names-the-table form).
+    public override string? SqlQuery
+    {
+        get => base.SqlQuery;
+        set
+        {
+            base.SqlQuery = value;
+            _ingestTable = null;
+            _ingestCatalog = null;
+            _ingestSchema = null;
+            _ingestTemporary = false;
+            _ingestMode = IngestMode.Create;
+        }
+    }
+
     public override void SetOption(string key, string value)
     {
         ThrowIfDisposed();

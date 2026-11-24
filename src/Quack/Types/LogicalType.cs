@@ -112,7 +112,8 @@ public sealed class LogicalType : IEquatable<LogicalType>
                 return (TypeInfo as EnumTypeInfo)?.PhysicalType ?? PhysicalType.Invalid;
             case LogicalTypeId.Decimal:
                 return DecimalPhysicalType((TypeInfo as DecimalTypeInfo)?.Width ?? 0);
-            case LogicalTypeId.SqlNull: return PhysicalType.Bool;
+            // DuckDB stores SQLNULL as an INT32 (all rows null).
+            case LogicalTypeId.SqlNull: return PhysicalType.Int32;
             case LogicalTypeId.Pointer: return PhysicalType.UInt64;
             case LogicalTypeId.Validity: return PhysicalType.Bit;
             default:

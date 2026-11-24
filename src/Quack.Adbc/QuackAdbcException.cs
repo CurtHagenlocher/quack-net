@@ -67,7 +67,8 @@ internal sealed class QuackAdbcException : AdbcException
             "IO" or "HTTP" or "Connection" => AdbcStatusCode.IOError,
             "Not implemented" => AdbcStatusCode.NotImplemented,
             "INTERNAL" or "FATAL" or "Data Corruption" => AdbcStatusCode.InternalError,
-            null when error.HttpStatusCode is not null => AdbcStatusCode.IOError,
+            // No server answer: the HTTP request failed (connection, TLS handshake) or returned an HTTP error.
+            null when error.HttpStatusCode is not null || error.InnerException is HttpRequestException or IOException => AdbcStatusCode.IOError,
             _ => AdbcStatusCode.UnknownError,
         };
     }

@@ -122,8 +122,23 @@ internal sealed class QuackAdbcDatabase : AdbcDatabase
         return new QuackAdbcConnection(connection, defaultCommandTimeout);
     }
 
+    private static readonly HashSet<string> KnownOptions =
+    [
+        QuackAdbcDriver.UriParameter,
+        QuackAdbcDriver.TokenParameter,
+        QuackAdbcDriver.UseSSLParameter,
+        QuackAdbcDriver.TlsParameter,
+        QuackAdbcDriver.CommandTimeoutSecondsParameter,
+        QuackAdbcDriver.ReconnectOnSessionLossParameter,
+    ];
+
+    // An option the driver does not know is NOT_IMPLEMENTED, as ADBC asks.
     public override void SetOption(string key, string value)
     {
+        if (!KnownOptions.Contains(key))
+        {
+            throw new AdbcException($"Unknown database option '{key}'.", AdbcStatusCode.NotImplemented);
+        }
         _options[key] = value;
     }
 

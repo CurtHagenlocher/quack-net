@@ -52,8 +52,17 @@ internal static class RecordBatchConverter
         DoubleType => new LogicalType(LogicalTypeId.Double),
         BooleanType => new LogicalType(LogicalTypeId.Boolean),
         Date32Type => new LogicalType(LogicalTypeId.Date),
+        // A negative scale (unscaled * 10^-scale) becomes DECIMAL(p + |s|, 0), as DuckDB reads it.
+        Decimal128Type dt when dt.Scale < 0 => dt.Precision - dt.Scale <= 38
+            ? new LogicalType(LogicalTypeId.Decimal, new DecimalTypeInfo { Width = (byte)(dt.Precision - dt.Scale), Scale = 0 })
+            : throw new NotSupportedException($"Arrow {dt} needs more than 38 digits."),
         Decimal128Type dt => new LogicalType(LogicalTypeId.Decimal,
             new DecimalTypeInfo { Width = (byte)dt.Precision, Scale = (byte)dt.Scale }),
+        LargeStringType or StringViewType => new LogicalType(LogicalTypeId.Varchar),
+        LargeBinaryType or BinaryViewType => new LogicalType(LogicalTypeId.Blob),
+        Time32Type => new LogicalType(LogicalTypeId.Time),
+        // DuckDB 2.0 has a storable NULL type.
+        NullType => new LogicalType(LogicalTypeId.SqlNull),
         // arrow.uuid is a UUID; any other fixed-size binary is a BLOB, as DuckDB
         // reads it.
         GuidType => new LogicalType(LogicalTypeId.Uuid),
@@ -84,7 +93,10 @@ internal static class RecordBatchConverter
         MapType mt => BuildMapLogicalType(mt),
         VariantType => LogicalType.Variant,
         StructType st => new LogicalType(LogicalTypeId.Struct, BuildStructTypeInfo(st)),
-        DictionaryType dt => BuildEnumLogicalType(dt),
+        // Decoded to the value type, as DuckDB reads a dictionary (an existing
+        // ENUM column takes the strings by DuckDB's own cast).
+        DictionaryType dt when dt.ValueType is StringType or LargeStringType or StringViewType
+            or BinaryType or LargeBinaryType or BinaryViewType => MapType(dt.ValueType),
         _ => throw new NotSupportedException(
             $"Arrow type '{arrowType.GetType().Name}' is not yet supported on the append path."),
     };
@@ -112,27 +124,6 @@ internal static class RecordBatchConverter
             children[i] = new(st.Fields[i].Name, MapType(st.Fields[i].DataType));
         }
         return new StructTypeInfo { ChildTypes = children };
-    }
-
-    private static LogicalType BuildEnumLogicalType(DictionaryType dt)
-    {
-        if (dt.ValueType is not StringType)
-        {
-            throw new NotSupportedException(
-                $"DictionaryArray with non-string value type '{dt.ValueType}' is not supported for ENUM append.");
-        }
-        // The actual dictionary values are populated when we see the array,
-        // not here — but EnumTypeInfo requires the symbol list. Caller will
-        // patch this. Use an empty placeholder; ToColumn fills it in.
-        PhysicalType indexPhysical = dt.IndexType switch
-        {
-            UInt8Type => PhysicalType.UInt8,
-            UInt16Type => PhysicalType.UInt16,
-            UInt32Type => PhysicalType.UInt32,
-            _ => throw new NotSupportedException($"Unsupported enum index type '{dt.IndexType}'."),
-        };
-        return new LogicalType(LogicalTypeId.Enum,
-            new EnumTypeInfo { Values = System.Array.Empty<string>(), PhysicalType = indexPhysical });
     }
 
     private static DuckDbColumn ToColumn(IArrowArray array, LogicalType targetType, int rowCount)
@@ -170,7 +161,19 @@ internal static class RecordBatchConverter
             ListArray a => BuildListColumn(a, targetType, rowCount, validity),
             StructArray a => BuildStructColumn(a, targetType, rowCount, validity),
             FixedSizeListArray a => BuildFixedSizeListColumn(a, targetType, rowCount, validity),
-            DictionaryArray a => BuildEnumColumn(a, targetType, rowCount, validity),
+            DictionaryArray a => DecodeDictionary(a, targetType, rowCount, validity),
+            LargeBinaryArray a => CopyVarBytes(i => a.GetBytes(i), a, targetType, rowCount, validity),
+            BinaryViewArray a => CopyVarBytes(i => a.GetBytes(i), a, targetType, rowCount, validity),
+            Time32Array a => Time32ToMicros(a, targetType, rowCount, validity),
+            // Every row null; DuckDB keeps an INT32 per row underneath.
+            NullArray => new FixedSizeColumn
+            {
+                Type = targetType,
+                Count = rowCount,
+                ElementSize = sizeof(int),
+                Data = new byte[rowCount * sizeof(int)],
+                Validity = new ValidityMask(new byte[ValidityMask.RequiredByteCount(rowCount)]),
+            },
             _ => throw new NotSupportedException(
                 $"Arrow array kind '{array.GetType().Name}' is not yet supported on the append path."),
         };
@@ -181,6 +184,11 @@ internal static class RecordBatchConverter
         if (array.NullCount == 0)
         {
             return ValidityMask.AllValid;
+        }
+        // A NullArray has no buffers: every row is null.
+        if (array is NullArray)
+        {
+            return new ValidityMask(new byte[ValidityMask.RequiredByteCount(rowCount)]);
         }
         // Arrow stores the validity bitmap at Buffers[0]; non-primitive arrays
         // may have it empty when NullCount is 0 but we already returned above.
@@ -265,7 +273,14 @@ internal static class RecordBatchConverter
             <= 18 => 8,
             _ => 16,
         };
-        if (elementSize == 16)
+        // A negative Arrow scale: the value is unscaled * 10^-scale.
+        int sourceScale = ((Decimal128Type)array.Data.DataType).Scale;
+        Int128 factor = 1;
+        for (int k = 0; k < -sourceScale; k++)
+        {
+            factor *= 10;
+        }
+        if (elementSize == 16 && factor == 1)
         {
             return Fixed(array.Data, type, rowCount, 16, validity);
         }
@@ -274,10 +289,11 @@ internal static class RecordBatchConverter
         byte[] dest = new byte[rowCount * elementSize];
         for (int i = 0; i < rowCount; i++)
         {
-            Int128 v = HugeintLayout.ReadSigned(src.Slice(i * 16, 16));
+            Int128 v = checked(HugeintLayout.ReadSigned(src.Slice(i * 16, 16)) * factor);
             Span<byte> slot = dest.AsSpan(i * elementSize, elementSize);
             switch (elementSize)
             {
+                case 16: HugeintLayout.WriteSigned(slot, v); break;
                 case 2: System.Buffers.Binary.BinaryPrimitives.WriteInt16LittleEndian(slot, checked((short)v)); break;
                 case 4: System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(slot, checked((int)v)); break;
                 case 8: System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(slot, checked((long)v)); break;
@@ -291,6 +307,72 @@ internal static class RecordBatchConverter
             Data = dest,
             Validity = validity,
         };
+    }
+
+    private delegate ReadOnlySpan<byte> ValueBytes(int index);
+
+    // Variable-width values of any Arrow layout (large offsets, views), copied
+    // into one buffer and sliced.
+    private static VarBytesColumn CopyVarBytes(ValueBytes valueBytes, IArrowArray array, LogicalType type, int rowCount, ValidityMask validity)
+    {
+        int total = 0;
+        for (int i = 0; i < rowCount; i++)
+        {
+            if (!array.IsNull(i)) total = checked(total + valueBytes(i).Length);
+        }
+        byte[] data = new byte[total];
+        ReadOnlyMemory<byte>?[] values = new ReadOnlyMemory<byte>?[rowCount];
+        int offset = 0;
+        for (int i = 0; i < rowCount; i++)
+        {
+            if (array.IsNull(i)) continue;
+            ReadOnlySpan<byte> value = valueBytes(i);
+            value.CopyTo(data.AsSpan(offset));
+            values[i] = data.AsMemory(offset, value.Length);
+            offset += value.Length;
+        }
+        return new VarBytesColumn { Type = type, Count = rowCount, Values = values, Validity = validity };
+    }
+
+    // A dictionary of strings or bytes, decoded to its values.
+    private static VarBytesColumn DecodeDictionary(DictionaryArray array, LogicalType type, int rowCount, ValidityMask validity)
+    {
+        IArrowArray dictionary = array.Dictionary;
+        ValueBytes entry = dictionary switch
+        {
+            BinaryArray d => i => d.GetBytes(i),
+            LargeBinaryArray d => i => d.GetBytes(i),
+            BinaryViewArray d => i => d.GetBytes(i),
+            _ => throw new NotSupportedException($"Dictionary of '{dictionary.Data.DataType}' is not supported on the append path."),
+        };
+        IArrowArray indices = array.Indices;
+        long Index(int i) => indices switch
+        {
+            Int8Array x => x.GetValue(i)!.Value,
+            Int16Array x => x.GetValue(i)!.Value,
+            Int32Array x => x.GetValue(i)!.Value,
+            Int64Array x => x.GetValue(i)!.Value,
+            UInt8Array x => x.GetValue(i)!.Value,
+            UInt16Array x => x.GetValue(i)!.Value,
+            UInt32Array x => x.GetValue(i)!.Value,
+            UInt64Array x => checked((long)x.GetValue(i)!.Value),
+            _ => throw new NotSupportedException($"Dictionary index type '{indices.Data.DataType}' is not supported."),
+        };
+        return CopyVarBytes(i => entry(checked((int)Index(i))), array, type, rowCount, validity);
+    }
+
+    private static FixedSizeColumn Time32ToMicros(Time32Array array, LogicalType type, int rowCount, ValidityMask validity)
+    {
+        long factor = ((Time32Type)array.Data.DataType).Unit == TimeUnit.Second ? 1_000_000L : 1_000L;
+        byte[] data = new byte[rowCount * sizeof(long)];
+        for (int i = 0; i < rowCount; i++)
+        {
+            if (array.GetValue(i) is int value)
+            {
+                System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(data.AsSpan(i * sizeof(long)), value * factor);
+            }
+        }
+        return new FixedSizeColumn { Type = type, Count = rowCount, ElementSize = sizeof(long), Data = data, Validity = validity };
     }
 
     private static FixedSizeColumn IntervalNanosToMicros(MonthDayNanosecondIntervalArray array, LogicalType type, int rowCount, ValidityMask validity)
@@ -466,28 +548,4 @@ internal static class RecordBatchConverter
         };
     }
 
-    private static FixedSizeColumn BuildEnumColumn(DictionaryArray array, LogicalType type, int rowCount, ValidityMask validity)
-    {
-        // Replace the placeholder EnumTypeInfo from MapType with one carrying
-        // the actual dictionary values.
-        StringArray dict = (StringArray)array.Dictionary;
-        string[] values = new string[dict.Length];
-        for (int i = 0; i < dict.Length; i++) values[i] = dict.GetString(i)!;
-        EnumTypeInfo enumInfo = (EnumTypeInfo)type.TypeInfo!;
-        EnumTypeInfo populated = new()
-        {
-            Values = values,
-            PhysicalType = enumInfo.PhysicalType,
-        };
-        LogicalType finalType = new(LogicalTypeId.Enum, populated);
-
-        int elementSize = enumInfo.PhysicalType switch
-        {
-            PhysicalType.UInt8 => 1,
-            PhysicalType.UInt16 => 2,
-            PhysicalType.UInt32 => 4,
-            _ => throw new NotSupportedException($"Unsupported enum index physical '{enumInfo.PhysicalType}'."),
-        };
-        return Fixed(array.Indices.Data, finalType, rowCount, elementSize, validity);
-    }
 }

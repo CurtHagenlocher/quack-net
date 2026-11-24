@@ -46,6 +46,8 @@ internal static class LogicalTypeSql
             case LogicalTypeId.TimestampTzNs: sb.Append("TIMESTAMPTZ_NS"); return;
             case LogicalTypeId.Interval: sb.Append("INTERVAL"); return;
             case LogicalTypeId.Uuid: sb.Append("UUID"); return;
+            // DuckDB 2.0 stores a column of type NULL; the name is a keyword, so quoted.
+            case LogicalTypeId.SqlNull: sb.Append("\"NULL\""); return;
             case LogicalTypeId.Varchar:
             case LogicalTypeId.Char:
             case LogicalTypeId.StringLiteral:

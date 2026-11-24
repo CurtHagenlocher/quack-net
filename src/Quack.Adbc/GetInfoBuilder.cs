@@ -147,21 +147,26 @@ internal static class GetInfoBuilder
         {
             [AdbcInfoCode.VendorName] = "DuckDB",
             [AdbcInfoCode.VendorVersion] = connection.Underlying.ServerDuckDbVersion,
-            [AdbcInfoCode.VendorArrowVersion] = AssemblyVersion(arrowAsm),
+            [AdbcInfoCode.VendorArrowVersion] = "v" + AssemblyVersion(arrowAsm),
             [AdbcInfoCode.VendorSql] = true,
             [AdbcInfoCode.VendorSubstrait] = false,
             [AdbcInfoCode.DriverName] = "quack-net ADBC",
             [AdbcInfoCode.DriverVersion] = AssemblyVersion(driverAsm),
-            [AdbcInfoCode.DriverArrowVersion] = AssemblyVersion(arrowAsm),
+            [AdbcInfoCode.DriverArrowVersion] = "v" + AssemblyVersion(arrowAsm),
             // The ADBC API revision the driver implements (ADBC_VERSION_1_1_0).
             [AdbcInfoCode.DriverAdbcVersion] = 1_001_000L,
         };
     }
 
-    private static string AssemblyVersion(Assembly asm) =>
-        asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-        ?? asm.GetName().Version?.ToString()
-        ?? "unknown";
+    // The version without SemVer build metadata (the "+<commit>" the SDK appends).
+    private static string AssemblyVersion(Assembly asm)
+    {
+        string version = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? asm.GetName().Version?.ToString()
+            ?? "unknown";
+        int plus = version.IndexOf('+');
+        return plus < 0 ? version : version[..plus];
+    }
 
     private static ListArray BuildEmptyStringList()
     {
