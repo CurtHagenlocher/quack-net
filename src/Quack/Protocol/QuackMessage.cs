@@ -38,7 +38,14 @@ public abstract record QuackMessage
         s.BeginObject();
         SerializeBody(s);
         s.EndObject();
-        if (this is IChunkBlobMessage blob)
+        if (this is SendDataRequestMessage { SerializedChunks: { } serialized })
+        {
+            foreach (ReadOnlyMemory<byte> chunk in serialized)
+            {
+                s.WriteRawBytes(chunk.Span);
+            }
+        }
+        else if (this is IChunkBlobMessage blob)
         {
             foreach (DuckDbChunk chunk in blob.Chunks)
             {

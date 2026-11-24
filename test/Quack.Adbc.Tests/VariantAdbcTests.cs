@@ -142,6 +142,41 @@ public class VariantAdbcTests : IClassFixture<QuackServerFixture>
         Execute(conn, $"DROP TABLE {table}");
     }
 
+    // Ingested Parquet decimals get the width of their digits (at least the
+    // scale), as duckdb's Parquet reader assigns it. One deliberate deviation:
+    // duckdb computes the digit count through a floating-point log10, so 18 nines
+    // come out as DECIMAL(19, 0) there (measured: COPY ... TO parquet, then
+    // read_parquet, DuckDB v2.0.1); this client counts digits exactly.
+    [Theory]
+    [InlineData("0.005", "DECIMAL(3, 3)")]
+    [InlineData("12.34", "DECIMAL(4, 2)")]
+    [InlineData("99999999.9", "DECIMAL(9, 1)")]
+    [InlineData("999999999999999999", "DECIMAL(18, 0)")]
+    public async Task Ingest_DecimalWidth(string value, string expected)
+    {
+        using AdbcConnection conn = OpenConnection();
+        string table = "vad_" + Guid.NewGuid().ToString("N")[..8];
+        Execute(conn, $"CREATE TABLE {table} (v VARIANT)");
+        decimal d = decimal.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
+        VariantArray.Builder variants = new();
+        variants.Append(d >= 1_000_000_000m ? VariantValue.FromDecimal8(d) : VariantValue.FromDecimal4(d));
+        Schema schema = new Schema.Builder().Field(new Field("v", VariantType.Default, true)).Build();
+        using RecordBatch batch = new(schema, [variants.Build()], 1);
+        using (AdbcStatement ingest = conn.CreateStatement())
+        {
+            ingest.SqlQuery = table;
+            ingest.Bind(batch, schema);
+            ingest.ExecuteUpdate();
+        }
+        using AdbcStatement check = conn.CreateStatement();
+        check.SqlQuery = $"SELECT variant_typeof(v) FROM {table}";
+        QueryResult result = check.ExecuteQuery();
+        using IArrowArrayStream stream = result.Stream!;
+        RecordBatch? b = await stream.ReadNextRecordBatchAsync();
+        Assert.Equal(expected, ((StringArray)b!.Column(0)).GetString(0));
+        Execute(conn, $"DROP TABLE {table}");
+    }
+
     [Theory]
     [InlineData("INTERVAL '1 day'")]
     [InlineData("'10110'::BIT")]

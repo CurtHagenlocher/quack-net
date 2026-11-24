@@ -19,6 +19,8 @@ public sealed record SendDataRequestMessage : QuackMessage, IChunkBlobMessage
 
     public string StreamId { get; init; } = string.Empty;
     public IReadOnlyList<DuckDbChunk> Chunks { get; init; } = [];
+    // Chunks already serialized (DataChunkWriter objects); sent instead of Chunks when set.
+    internal IReadOnlyList<ReadOnlyMemory<byte>>? SerializedChunks { get; init; }
     // Set on every batch, unset on the terminal message.
     public ulong? BatchIndex { get; init; }
     // Set on the terminal message only.
@@ -27,7 +29,7 @@ public sealed record SendDataRequestMessage : QuackMessage, IChunkBlobMessage
     internal override void SerializeBody(BinarySerializer s)
     {
         s.WritePropertyWithDefault(fieldId: 1, StreamId);
-        s.WritePropertyWithDefault(fieldId: 2, (ulong)Chunks.Count);
+        s.WritePropertyWithDefault(fieldId: 2, (ulong)(SerializedChunks?.Count ?? Chunks.Count));
         OptionalIdx.WritePropertyWithDefault(s, fieldId: 3, TotalBatches);
         OptionalIdx.WritePropertyWithDefault(s, fieldId: 4, BatchIndex);
     }

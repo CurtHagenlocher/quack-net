@@ -225,6 +225,52 @@ public class QuackV3MessageTests
     }
 
     [Fact]
+    public void SendDataBatches_StayUnderTheTarget_AndKeepRowOrder()
+    {
+        int[] ids = Enumerable.Range(0, 5000).ToArray();
+        DuckDbChunk chunk = ChunkBuilder.OneColumn(IntType,
+            new FixedSizeColumn { Type = IntType, Count = ids.Length, ElementSize = 4, Data = ChunkBuilder.Int32Bytes(ids) });
+        const int target = 3000;
+        List<IReadOnlyList<ReadOnlyMemory<byte>>> batches = QuackConnection.SendDataBatches([chunk, chunk], target).ToList();
+        Assert.True(batches.Count > 2);
+        List<int> rows = [];
+        foreach (IReadOnlyList<ReadOnlyMemory<byte>> batch in batches)
+        {
+            Assert.True(batch.Sum(p => p.Length) <= target || batch.Count == 1);
+            foreach (ReadOnlyMemory<byte> piece in batch)
+            {
+                DuckDbChunk read = DataChunkReader.Read(new BinaryDeserializer(piece));
+                Assert.True(read.RowCount <= 2048);
+                FixedSizeColumn col = (FixedSizeColumn)read.Columns[0];
+                for (int r = 0; r < read.RowCount; r++) rows.Add(BinaryPrimitives.ReadInt32LittleEndian(col.GetBytes(r)));
+            }
+        }
+        Assert.Equal(ids.Concat(ids), rows);
+    }
+
+    // A DICTIONARY vector of VARIANT (field 90 = 3, sel_vector, dict_count,
+    // then the dictionary inline) expands through the general gather.
+    [Fact]
+    public void DictionaryVectorOfVariant_IsExpanded()
+    {
+        DuckDbVariant a = new(DuckDbVariantType.Object, new List<KeyValuePair<string, DuckDbVariant>> { new("k", new(DuckDbVariantType.Int32, 1)) });
+        DuckDbVariant b = new(DuckDbVariantType.Varchar, "two");
+        VariantColumn dictionary = new() { Type = LogicalType.Variant, Count = 2, Values = [a, b] };
+        uint[] sel = [1, 0, 0, 1, 1];
+        ArrayBufferWriter<byte> buffer = new();
+        BinarySerializer s = new(buffer);
+        s.WriteProperty(fieldId: 90, (byte)3);
+        s.WriteFieldId(91);
+        s.WriteBlob(System.Runtime.InteropServices.MemoryMarshal.AsBytes(sel.AsSpan()));
+        s.WriteProperty(fieldId: 92, 2UL);
+        VectorWriter.Write(s, dictionary, 2);
+        s.EndObject();
+
+        VariantColumn read = Assert.IsType<VariantColumn>(VectorReader.Read(new BinaryDeserializer(buffer.WrittenMemory), LogicalType.Variant, sel.Length));
+        Assert.Equal(new DuckDbVariant?[] { b, a, a, b, b }, read.Values.AsEnumerable());
+    }
+
+    [Fact]
     public void UnnamedStruct_RendersAsTuple_MixedIsRefused()
     {
         LogicalType unnamed = new(LogicalTypeId.Struct, new StructTypeInfo { ChildTypes = [new("", IntType), new("", VarcharType)] });

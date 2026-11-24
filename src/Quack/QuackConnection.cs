@@ -256,16 +256,18 @@ public sealed class QuackConnection : IAsyncDisposable
         string connectionId = ConnectionId;
         try
         {
-            for (int i = 0; i < batches.Count; i++)
+            ulong sent = 0;
+            foreach (IReadOnlyList<ReadOnlyMemory<byte>> batch in SendDataBatches(batches, SendDataTargetBatchBytes))
             {
+                sent++;
                 _ = await QueryCancellation.SendAsync<SendDataResponseMessage>(
                     _transport,
                     new SendDataRequestMessage
                     {
                         ConnectionId = connectionId,
                         StreamId = streamId,
-                        BatchIndex = (ulong)(i + 1),
-                        Chunks = DuckDbChunkSlicer.Split(batches[i]).ToList(),
+                        BatchIndex = sent,
+                        SerializedChunks = batch,
                     },
                     queryUuid,
                     cancellationToken,
@@ -277,7 +279,7 @@ public sealed class QuackConnection : IAsyncDisposable
                 {
                     ConnectionId = connectionId,
                     StreamId = streamId,
-                    TotalBatches = (ulong)batches.Count,
+                    TotalBatches = sent,
                 },
                 queryUuid,
                 cancellationToken,
@@ -306,6 +308,59 @@ public sealed class QuackConnection : IAsyncDisposable
                 // Best effort; keep the original error.
             }
             throw;
+        }
+    }
+
+    // duckdb-quack's quack_target_batch_bytes default. One SEND_DATA request is
+    // one HTTP body, and the server's HTTP layer refuses bodies over 100 MiB.
+    internal const int SendDataTargetBatchBytes = 32 * 1024 * 1024;
+
+    // Serialized chunks of at most 2048 rows, grouped into batches of about
+    // targetBytes (across input chunks). A piece that alone exceeds the target
+    // is halved until it fits or is a single row.
+    internal static IEnumerable<IReadOnlyList<ReadOnlyMemory<byte>>> SendDataBatches(IEnumerable<DuckDbChunk> chunks, int targetBytes)
+    {
+        List<ReadOnlyMemory<byte>> current = [];
+        long currentBytes = 0;
+        foreach (DuckDbChunk chunk in chunks)
+        {
+            foreach (DuckDbChunk slice in DuckDbChunkSlicer.Split(chunk))
+            {
+                foreach (ReadOnlyMemory<byte> piece in SerializeWithin(slice, targetBytes))
+                {
+                    if (current.Count > 0 && currentBytes + piece.Length > targetBytes)
+                    {
+                        yield return current;
+                        current = [];
+                        currentBytes = 0;
+                    }
+                    current.Add(piece);
+                    currentBytes += piece.Length;
+                }
+            }
+        }
+        if (current.Count > 0)
+        {
+            yield return current;
+        }
+    }
+
+    private static IEnumerable<ReadOnlyMemory<byte>> SerializeWithin(DuckDbChunk chunk, int targetBytes)
+    {
+        System.Buffers.ArrayBufferWriter<byte> buffer = new();
+        DataChunkWriter.Write(new Serialization.BinarySerializer(buffer), chunk);
+        if (buffer.WrittenCount <= targetBytes || chunk.RowCount == 1)
+        {
+            yield return buffer.WrittenMemory;
+            yield break;
+        }
+        int half = chunk.RowCount / 2;
+        foreach (DuckDbChunk part in DuckDbChunkSlicer.Split(chunk, half))
+        {
+            foreach (ReadOnlyMemory<byte> piece in SerializeWithin(part, targetBytes))
+            {
+                yield return piece;
+            }
         }
     }
 
