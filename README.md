@@ -139,6 +139,40 @@ QueryResult qr = stmt.ExecuteQuery();
 RecordBatch? batch = await qr.Stream!.ReadNextRecordBatchAsync();
 ```
 
+### Bulk ingest
+
+ADBC's standard bulk ingest: set `adbc.ingest.target_table` (plus, as
+needed, `adbc.ingest.mode`, `adbc.ingest.target_catalog`,
+`adbc.ingest.target_db_schema`, `adbc.ingest.temporary`), bind a batch with
+`Bind` or a stream with `BindStream`, and call `ExecuteUpdate`, which returns
+the number of rows written.
+
+```csharp
+using AdbcStatement ingest = conn.CreateStatement();
+ingest.SetOption("adbc.ingest.target_table", "events");
+ingest.SetOption("adbc.ingest.mode", "adbc.ingest.mode.create_append");
+ingest.BindStream(reader);                 // any IArrowArrayStream
+long rows = ingest.ExecuteUpdate().AffectedRows;
+```
+
+| mode | statement |
+|---|---|
+| `create` (the default) | `CREATE TABLE t AS SELECT * FROM <stream>`; fails if t exists |
+| `append` | `INSERT INTO t SELECT * FROM <stream>`; fails if t does not exist |
+| `replace` | `CREATE OR REPLACE TABLE t AS SELECT * FROM <stream>` |
+| `create_append` | `CREATE TABLE IF NOT EXISTS t (...)`, then the append |
+
+The rows travel as one client data stream (`scan_data_from_quack_client`):
+the batches are sent as they are read, in batches of about 32 MiB, and each
+one is released once it has been serialized. `create`, `replace` and
+`append` are a single statement each; `create_append`'s two are not atomic.
+A created table takes the Arrow schema's column names and DuckDB types; an
+append matches columns by position. A temporary target is `temp.main` and
+can't be combined with a catalog or schema.
+
+The older form still works: without `adbc.ingest.target_table`, a bound batch
+or stream is appended to the existing table that `SqlQuery` names.
+
 ## Using the native library from Python (or any ADBC C-API consumer)
 
 Each release publishes a self-contained native library per platform:
@@ -171,6 +205,13 @@ with adbc_driver_manager.dbapi.connect(
 
 The library is fully self-contained: no .NET runtime, no DuckDB native
 library, no other dependencies at the call site.
+
+Bulk ingest works through the DB-API extension, with every mode:
+
+```python
+with conn.cursor() as cur:
+    cur.adbc_ingest("events", arrow_table_or_reader, mode="create_append")
+```
 
 ## Using the Power BI connector
 

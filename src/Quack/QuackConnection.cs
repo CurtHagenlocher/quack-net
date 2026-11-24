@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using System.Globalization;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -245,9 +246,53 @@ public sealed class QuackConnection : IAsyncDisposable
         }
 
         string streamId = Guid.NewGuid().ToString();
-        Int128 queryUuid = NewQueryUuid();
         string sql = BuildAppendSql(schemaName, tableName, streamId, types);
+        return await SendStreamAsync(sql, streamId, types, ToAsyncEnumerable(batches), cancellationToken).ConfigureAwait(false);
+    }
 
+    internal enum IngestMode
+    {
+        Append,
+        Create,
+        Replace,
+        CreateAppend,
+    }
+
+    // Where an ADBC bulk ingest goes. A temporary target is DuckDB's temp.main.
+    internal sealed record IngestTarget(string Table, string? Catalog, string? Schema, bool Temporary, IngestMode Mode);
+
+    // ADBC bulk ingest: the chunks' rows into the target, one statement per mode,
+    // the chunks read from the source as they are sent:
+    //   append         INSERT INTO t SELECT * FROM scan_data_from_quack_client(...)
+    //   create         CREATE TABLE t AS SELECT * FROM scan_data_from_quack_client(...)
+    //   replace        CREATE OR REPLACE TABLE t AS SELECT * FROM scan_data_from_quack_client(...)
+    //   create_append  CREATE TABLE IF NOT EXISTS t (columns), then the append
+    // create and replace are one statement each; create_append's two are not atomic.
+    // The column names matter for a created table only; the append is by position.
+    internal async Task<long> IngestAsync(IngestTarget target, IReadOnlyList<string> names, IReadOnlyList<LogicalType> types, IAsyncEnumerable<DuckDbChunk> chunks, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentException.ThrowIfNullOrEmpty(target.Table);
+        if (names.Count != types.Count || types.Count == 0)
+        {
+            throw new ArgumentException("An ingest needs at least one column and one name per column.", nameof(names));
+        }
+        if (target.Mode == IngestMode.CreateAppend)
+        {
+            QuackQueryResult created = await ExecuteAsync(BuildCreateIfNotExistsSql(target, names, types), cancellationToken).ConfigureAwait(false);
+            _ = await created.ToListAsync(cancellationToken).ConfigureAwait(false);
+        }
+        string streamId = Guid.NewGuid().ToString();
+        string sql = BuildIngestSql(target, streamId, names, types);
+        return await SendStreamAsync(sql, streamId, types, chunks, cancellationToken).ConfigureAwait(false);
+    }
+
+    // Prepares sql (which scans streamId), sends the chunks as SEND_DATA batches,
+    // ends the stream with the batch count and fetches the statement's row count.
+    private async Task<long> SendStreamAsync(string sql, string streamId, IReadOnlyList<LogicalType> types, IAsyncEnumerable<DuckDbChunk> chunks, CancellationToken cancellationToken)
+    {
+        Int128 queryUuid = NewQueryUuid();
         _ = await SendWithReconnectAsync<PrepareResponseMessage>(
             id => new PrepareRequestMessage { ConnectionId = id, SqlQuery = sql, QueryUuid = queryUuid, InlineRows = 0 },
             queryUuid,
@@ -257,7 +302,7 @@ public sealed class QuackConnection : IAsyncDisposable
         try
         {
             ulong sent = 0;
-            foreach (IReadOnlyList<ReadOnlyMemory<byte>> batch in SendDataBatches(batches, SendDataTargetBatchBytes))
+            await foreach (IReadOnlyList<ReadOnlyMemory<byte>> batch in SendDataBatchesAsync(OfTypes(chunks, types), SendDataTargetBatchBytes, cancellationToken).ConfigureAwait(false))
             {
                 sent++;
                 _ = await QueryCancellation.SendAsync<SendDataResponseMessage>(
@@ -311,6 +356,31 @@ public sealed class QuackConnection : IAsyncDisposable
         }
     }
 
+    private static async IAsyncEnumerable<DuckDbChunk> ToAsyncEnumerable(IReadOnlyList<DuckDbChunk> chunks)
+    {
+        foreach (DuckDbChunk chunk in chunks)
+        {
+            yield return chunk;
+        }
+        await Task.CompletedTask.ConfigureAwait(false);
+    }
+
+    // The non-empty chunks, each checked against the stream's column types.
+    private static async IAsyncEnumerable<DuckDbChunk> OfTypes(IAsyncEnumerable<DuckDbChunk> chunks, IReadOnlyList<LogicalType> types)
+    {
+        await foreach (DuckDbChunk chunk in chunks.ConfigureAwait(false))
+        {
+            if (!chunk.Types.SequenceEqual(types))
+            {
+                throw new ArgumentException("A chunk's column types differ from the stream's.");
+            }
+            if (chunk.RowCount > 0)
+            {
+                yield return chunk;
+            }
+        }
+    }
+
     // duckdb-quack's quack_target_batch_bytes default. One SEND_DATA request is
     // one HTTP body, and the server's HTTP layer refuses bodies over 100 MiB.
     internal const int SendDataTargetBatchBytes = 32 * 1024 * 1024;
@@ -324,19 +394,16 @@ public sealed class QuackConnection : IAsyncDisposable
         long currentBytes = 0;
         foreach (DuckDbChunk chunk in chunks)
         {
-            foreach (DuckDbChunk slice in DuckDbChunkSlicer.Split(chunk))
+            foreach (ReadOnlyMemory<byte> piece in Pieces(chunk, targetBytes))
             {
-                foreach (ReadOnlyMemory<byte> piece in SerializeWithin(slice, targetBytes))
+                if (current.Count > 0 && currentBytes + piece.Length > targetBytes)
                 {
-                    if (current.Count > 0 && currentBytes + piece.Length > targetBytes)
-                    {
-                        yield return current;
-                        current = [];
-                        currentBytes = 0;
-                    }
-                    current.Add(piece);
-                    currentBytes += piece.Length;
+                    yield return current;
+                    current = [];
+                    currentBytes = 0;
                 }
+                current.Add(piece);
+                currentBytes += piece.Length;
             }
         }
         if (current.Count > 0)
@@ -344,6 +411,39 @@ public sealed class QuackConnection : IAsyncDisposable
             yield return current;
         }
     }
+
+    // As SendDataBatches, from a stream. A chunk is serialized completely (into
+    // new buffers) before the next one is requested, so a source may release a
+    // chunk's memory once it is asked for the next.
+    internal static async IAsyncEnumerable<IReadOnlyList<ReadOnlyMemory<byte>>> SendDataBatchesAsync(
+        IAsyncEnumerable<DuckDbChunk> chunks, int targetBytes, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        List<ReadOnlyMemory<byte>> current = [];
+        long currentBytes = 0;
+        await foreach (DuckDbChunk chunk in chunks.WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            List<ReadOnlyMemory<byte>> pieces = Pieces(chunk, targetBytes).ToList();
+            foreach (ReadOnlyMemory<byte> piece in pieces)
+            {
+                if (current.Count > 0 && currentBytes + piece.Length > targetBytes)
+                {
+                    yield return current;
+                    current = [];
+                    currentBytes = 0;
+                }
+                current.Add(piece);
+                currentBytes += piece.Length;
+            }
+        }
+        if (current.Count > 0)
+        {
+            yield return current;
+        }
+    }
+
+    // A chunk as serialized pieces of at most 2048 rows (DuckDB's vector size).
+    private static IEnumerable<ReadOnlyMemory<byte>> Pieces(DuckDbChunk chunk, int targetBytes)
+        => DuckDbChunkSlicer.Split(chunk).SelectMany(slice => SerializeWithin(slice, targetBytes));
 
     private static IEnumerable<ReadOnlyMemory<byte>> SerializeWithin(DuckDbChunk chunk, int targetBytes)
     {
@@ -372,15 +472,85 @@ public sealed class QuackConnection : IAsyncDisposable
             sb.Append(LogicalTypeSql.QuoteIdentifier(schemaName)).Append('.');
         }
         sb.Append(LogicalTypeSql.QuoteIdentifier(tableName));
-        sb.Append(" SELECT * FROM scan_data_from_quack_client('").Append(streamId.Replace("'", "''", StringComparison.Ordinal));
+        sb.Append(" SELECT * FROM ");
+        AppendScan(sb, streamId, names: null, types);
+        return sb.ToString();
+    }
+
+    internal static string BuildIngestSql(IngestTarget target, string streamId, IReadOnlyList<string> names, IReadOnlyList<LogicalType> types)
+    {
+        bool creates = target.Mode is IngestMode.Create or IngestMode.Replace;
+        string temp = target.Temporary ? "TEMP " : "";
+        StringBuilder sb = new(target.Mode switch
+        {
+            IngestMode.Create => $"CREATE {temp}TABLE ",
+            IngestMode.Replace => $"CREATE OR REPLACE {temp}TABLE ",
+            _ => "INSERT INTO ",
+        });
+        AppendTarget(sb, target, creating: creates);
+        sb.Append(creates ? " AS SELECT * FROM " : " SELECT * FROM ");
+        AppendScan(sb, streamId, creates ? names : null, types);
+        return sb.ToString();
+    }
+
+    internal static string BuildCreateIfNotExistsSql(IngestTarget target, IReadOnlyList<string> names, IReadOnlyList<LogicalType> types)
+    {
+        StringBuilder sb = new(target.Temporary ? "CREATE TEMP TABLE IF NOT EXISTS " : "CREATE TABLE IF NOT EXISTS ");
+        AppendTarget(sb, target, creating: true);
+        sb.Append(" (");
+        for (int i = 0; i < types.Count; i++)
+        {
+            if (i > 0) sb.Append(", ");
+            sb.Append(LogicalTypeSql.QuoteIdentifier(names[i])).Append(' ').Append(LogicalTypeSql.ToSql(types[i]));
+        }
+        return sb.Append(')').ToString();
+    }
+
+    // A temporary table is created as CREATE TEMP TABLE t (DuckDB refuses the
+    // temp catalog there) and written as temp.main.t.
+    private static void AppendTarget(StringBuilder sb, IngestTarget target, bool creating)
+    {
+        if (target.Temporary)
+        {
+            if (!creating)
+            {
+                sb.Append("temp.main.");
+            }
+        }
+        else
+        {
+            if (!string.IsNullOrEmpty(target.Catalog))
+            {
+                sb.Append(LogicalTypeSql.QuoteIdentifier(target.Catalog)).Append('.');
+            }
+            if (!string.IsNullOrEmpty(target.Schema))
+            {
+                sb.Append(LogicalTypeSql.QuoteIdentifier(target.Schema)).Append('.');
+            }
+        }
+        sb.Append(LogicalTypeSql.QuoteIdentifier(target.Table));
+    }
+
+    // scan_data_from_quack_client('<stream>', NULL::STRUCT(<columns>), ordered := true);
+    // the STRUCT's field names are the scan's column names (col0, col1, ... unless given).
+    private static void AppendScan(StringBuilder sb, string streamId, IReadOnlyList<string>? names, IReadOnlyList<LogicalType> types)
+    {
+        sb.Append("scan_data_from_quack_client('").Append(streamId.Replace("'", "''", StringComparison.Ordinal));
         sb.Append("', NULL::STRUCT(");
         for (int i = 0; i < types.Count; i++)
         {
             if (i > 0) sb.Append(", ");
-            sb.Append("col").Append(i.ToString(CultureInfo.InvariantCulture)).Append(' ').Append(LogicalTypeSql.ToSql(types[i]));
+            if (names is null)
+            {
+                sb.Append("col").Append(i.ToString(CultureInfo.InvariantCulture));
+            }
+            else
+            {
+                sb.Append(LogicalTypeSql.QuoteIdentifier(names[i]));
+            }
+            sb.Append(' ').Append(LogicalTypeSql.ToSql(types[i]));
         }
         sb.Append("), ordered := true)");
-        return sb.ToString();
     }
 
     private static long ReadRowCount(FetchResponseMessage response)

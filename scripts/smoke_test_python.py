@@ -26,6 +26,7 @@ import uuid
 from pathlib import Path
 
 import adbc_driver_manager.dbapi
+import pyarrow as pa
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -136,6 +137,34 @@ def run_smoke_test(dll: Path, duckdb_exe: Path) -> None:
             schema = conn.adbc_get_table_schema("smoke")
             assert [f.name for f in schema] == ["id", "name"], f"unexpected schema: {schema}"
             print(f"[smoke] GetTableSchema -> {[f.name + ':' + str(f.type) for f in schema]}", flush=True)
+
+            # 5) Bulk ingest (adbc.ingest.* options + a bound stream).
+            def batch(start: int, count: int) -> pa.RecordBatch:
+                return pa.record_batch(
+                    [pa.array(range(start, start + count), pa.int64()),
+                     pa.array([f"n{i}" for i in range(start, start + count)], pa.string())],
+                    names=["id", "name"],
+                )
+
+            def rows(sql: str):
+                with conn.cursor() as cur:
+                    cur.execute(sql)
+                    return cur.fetchall()
+
+            reader = pa.RecordBatchReader.from_batches(batch(0, 0).schema, [batch(0, 3), batch(3, 0), batch(3, 2)])
+            with conn.cursor() as cur:
+                assert cur.adbc_ingest("ingested", reader, mode="create") == 5
+                assert cur.adbc_ingest("ingested", batch(5, 2), mode="append") == 2
+                assert cur.adbc_ingest("ingested2", pa.Table.from_batches([batch(0, 4)]), mode="create_append") == 4
+                assert cur.adbc_ingest("ingested2", batch(4, 1), mode="create_append") == 1
+                assert cur.adbc_ingest("ingested2", batch(100, 1), mode="replace") == 1
+                assert cur.adbc_ingest("tmp_ingest", batch(0, 2), mode="create", temporary=True) == 2
+            assert rows("SELECT count(*), min(id), max(id) FROM ingested") == [(7, 0, 6)]
+            assert rows("SELECT column_name, data_type FROM duckdb_columns() WHERE table_name = 'ingested' ORDER BY column_index") == [
+                ("id", "BIGINT"), ("name", "VARCHAR")]
+            assert rows("SELECT id, name FROM ingested2") == [(100, "n100")]
+            assert rows("SELECT count(*) FROM temp.main.tmp_ingest") == [(2,)]
+            print("[smoke] adbc_ingest create/append/create_append/replace/temporary -> ok", flush=True)
 
         print("[smoke] ALL CHECKS PASSED", flush=True)
     finally:
