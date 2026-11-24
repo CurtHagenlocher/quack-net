@@ -165,6 +165,11 @@ the connection unusable.
   and CREATE TABLE AS, and -1 when the statement reports none (DDL, a query).
 - UUID arrives as its text, as DuckDB's own Arrow export sends it. On ingest,
   `arrow.uuid` becomes a UUID and any other fixed-size binary a BLOB.
+- DuckDB 2.0's NULL type (a column of only NULLs) is Arrow's `null` type, both
+  ways.
+- Ingest also takes large and view strings and binary, `time32`, negative
+  decimal scales (as `DECIMAL(p + |s|, 0)`) and dictionaries, which are
+  decoded to their value type (an existing ENUM column takes the strings).
 - INTERVAL is `month_day_nano`; microseconds beyond the nanosecond range wrap,
   as in DuckDB's export.
 - A result type without an Arrow mapping (BIGNUM) fails with
