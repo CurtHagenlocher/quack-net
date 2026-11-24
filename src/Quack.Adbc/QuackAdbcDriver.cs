@@ -12,14 +12,15 @@ namespace Quack.Adbc;
 //   token  — the auth token expected by the server's quack_serve(...)
 //
 // Optional parameter keys:
-//   command_timeout_seconds — best-effort per-query timeout (positive
-//                             integer or decimal seconds). When it fires,
-//                             ExecuteQuery/ExecuteUpdate throws and the
-//                             ADBC connection becomes unusable — callers
-//                             must dispose and reopen. The server-side
-//                             query keeps running: quack version 3 has a
-//                             cancel message, but the driver does not send
-//                             it on timeout yet.
+//   command_timeout_seconds — per-query timeout (positive integer or
+//                             decimal seconds). When it fires, the driver
+//                             cancels the query on the server and
+//                             ExecuteQuery/ExecuteUpdate throws a
+//                             TimeoutException; the ADBC connection stays
+//                             usable. Only if the server does not stop the
+//                             query within 10 s is the request aborted
+//                             locally, and then the connection is unusable
+//                             (the exception says which).
 //                             May be overridden per-statement via
 //                             AdbcStatement.SetOption.
 //   reconnect_on_session_loss — "true"/"false" (default "false"). When

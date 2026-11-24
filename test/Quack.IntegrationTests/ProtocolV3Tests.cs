@@ -191,6 +191,52 @@ public class ProtocolV3Tests : IClassFixture<QuackServerFixture>
         Assert.Equal((ulong)ReadInt64(expected[0], 1), xor);
     }
 
+    [Fact]
+    public async Task Token_CancelsTheQueryOnTheServer_AndKeepsTheConnection()
+    {
+        await using QuackConnection conn = await QuackConnection.OpenAsync(_server.QuackUri, _server.Token);
+        string marker = "tok_" + Guid.NewGuid().ToString("N");
+        using CancellationTokenSource cts = new();
+
+        Task<QuackQueryResult> running = conn.ExecuteAsync(
+            $"SELECT count(*) /* {marker} */ FROM range(100000000000) a(x) WHERE x % 7 = 3", cts.Token);
+        await ServerSessions.WaitUntilActiveAsync(_server, marker);
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => running);
+        Assert.True(conn.IsUsable);
+        Assert.Equal("cancelled", await ServerSessions.StateOfConnectionAsync(_server, conn.ConnectionId));
+        Assert.False(await ServerSessions.IsActiveAsync(_server, marker));
+
+        IReadOnlyList<DuckDbChunk> back = await (await conn.ExecuteAsync("SELECT 42::BIGINT")).ToListAsync();
+        Assert.Equal(42, ReadInt64(Assert.Single(back), 0));
+    }
+
+    [Fact]
+    public async Task Token_DuringFetch_CancelsTheQueryOnTheServer()
+    {
+        await using QuackConnection conn = await QuackConnection.OpenAsync(_server.QuackUri, _server.Token);
+        string marker = "fetch_" + Guid.NewGuid().ToString("N");
+        // Large enough that FETCH follows PREPARE (see LargeResult_IsFetchedInDenseBatches).
+        QuackQueryResult result = await conn.ExecuteAsync(
+            $"SELECT hash(i) /* {marker} */ AS h FROM range(60000000) t(i)");
+        Assert.True(await ServerSessions.IsActiveAsync(_server, marker));
+        using CancellationTokenSource cts = new();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await foreach (DuckDbChunk _ in result.GetChunksAsync(cts.Token))
+            {
+                cts.Cancel();
+            }
+        });
+
+        Assert.True(conn.IsUsable);
+        Assert.Equal("cancelled", await ServerSessions.StateOfConnectionAsync(_server, conn.ConnectionId));
+        IReadOnlyList<DuckDbChunk> back = await (await conn.ExecuteAsync("SELECT 7::BIGINT")).ToListAsync();
+        Assert.Equal(7, ReadInt64(Assert.Single(back), 0));
+    }
+
     private static async Task Drain(QuackQueryResult result) => _ = await result.ToListAsync();
 
     private static long ReadInt64(DuckDbChunk chunk, int column)
@@ -232,4 +278,49 @@ public class ProtocolV3Tests : IClassFixture<QuackServerFixture>
             RowCount = count,
         };
     }
+}
+
+// Reads the server's own view of its sessions (quack_active_connections()),
+// over a separate connection, to check what happened to a statement.
+internal static class ServerSessions
+{
+    public static async Task<List<(string ConnectionId, string Query, string State)>> ListAsync(QuackServerFixture server)
+    {
+        await using QuackConnection observer = await QuackConnection.OpenAsync(server.QuackUri, server.Token);
+        IReadOnlyList<DuckDbChunk> chunks = await (await observer.ExecuteAsync(
+            "SELECT connection_id, coalesce(query, ''), state FROM quack_active_connections()")).ToListAsync();
+        List<(string, string, string)> rows = [];
+        foreach (DuckDbChunk chunk in chunks)
+        {
+            for (int i = 0; i < chunk.RowCount; i++)
+            {
+                rows.Add((Text(chunk, 0, i), Text(chunk, 1, i), Text(chunk, 2, i)));
+            }
+        }
+        return rows;
+    }
+
+    // Positive control: the statement carrying `marker` is visible as running.
+    public static async Task WaitUntilActiveAsync(QuackServerFixture server, string marker)
+    {
+        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+        while (DateTime.UtcNow < deadline)
+        {
+            if ((await ListAsync(server)).Any(r => r.Query.Contains(marker, StringComparison.Ordinal) && r.State == "active"))
+            {
+                return;
+            }
+            await Task.Delay(100);
+        }
+        throw new TimeoutException($"The statement '{marker}' never showed up as active on the server.");
+    }
+
+    public static async Task<string> StateOfConnectionAsync(QuackServerFixture server, string connectionId)
+        => Assert.Single(await ListAsync(server), r => r.ConnectionId == connectionId).State;
+
+    public static async Task<bool> IsActiveAsync(QuackServerFixture server, string marker)
+        => (await ListAsync(server)).Any(r => r.Query.Contains(marker, StringComparison.Ordinal) && r.State == "active");
+
+    private static string Text(DuckDbChunk chunk, int column, int row)
+        => System.Text.Encoding.UTF8.GetString(((VarBytesColumn)chunk.Columns[column]).Values[row]!.Value.Span);
 }

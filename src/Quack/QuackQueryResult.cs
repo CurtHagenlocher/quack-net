@@ -17,9 +17,8 @@ namespace Quack;
 // the client sends an Acknowledgement, so a server that retains results for
 // replay can drop this one.
 //
-// Cancelling the token passed to GetChunksAsync/ToListAsync aborts only the
-// local HTTP wait (and breaks the transport, see QuackConnection). To stop the
-// query on the server, call QuackConnection.CancelAsync(QueryUuid).
+// Cancelling the token passed to GetChunksAsync/ToListAsync cancels the query
+// on the server and keeps the connection usable (see QuackConnection).
 public sealed class QuackQueryResult
 {
     private readonly QuackTransport _transport;
@@ -62,10 +61,9 @@ public sealed class QuackQueryResult
         {
             for (ulong batchIndex = 1; ; batchIndex++)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
                 // Ack everything before this batch: we never ask for an earlier one again.
-                FetchResponseMessage response = await _transport.SendAsync<FetchResponseMessage>(
+                FetchResponseMessage response = await QueryCancellation.SendAsync<FetchResponseMessage>(
+                    _transport,
                     new FetchRequestMessage
                     {
                         ConnectionId = _connectionId,
@@ -73,7 +71,9 @@ public sealed class QuackQueryResult
                         BatchIndex = batchIndex,
                         AckIndex = batchIndex - 1,
                     },
-                    cancellationToken).ConfigureAwait(false);
+                    _queryUuid,
+                    cancellationToken,
+                    queryStarted: true).ConfigureAwait(false);
 
                 if (response.IsEndOfStream)
                 {

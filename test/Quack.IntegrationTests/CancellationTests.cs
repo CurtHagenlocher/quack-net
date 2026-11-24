@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0. See LICENSE in the project root for license information.
 
 using Quack;
+using Quack.Data;
 
 namespace Quack.IntegrationTests;
 
@@ -21,7 +22,7 @@ public class CancellationTests : IClassFixture<QuackServerFixture>
         "SELECT count(*) FROM range(1000000000) t(i) WHERE (i * i) % 7 = 0";
 
     [Fact]
-    public async Task ExecuteAsync_CancellationFires_ThrowsAndMarksTransportBroken()
+    public async Task ExecuteAsync_CancellationFires_CancelsOnServerAndKeepsConnection()
     {
         await using QuackConnection conn = await QuackConnection.OpenAsync(_server.QuackUri, _server.Token);
 
@@ -35,19 +36,17 @@ public class CancellationTests : IClassFixture<QuackServerFixture>
             _ = await result.ToListAsync(cts.Token);
         });
 
-        // After cancellation, a fresh request on the same transport must
-        // not be sent — the contract is that the connection is dead.
-        QuackException broken = await Assert.ThrowsAsync<QuackException>(
-            () => conn.ExecuteAsync("SELECT 1"));
-        Assert.Contains("broken", broken.Message, StringComparison.OrdinalIgnoreCase);
+        // Cancelling the token cancels the query on the server (CANCEL_REQUEST),
+        // so the connection stays usable.
+        Assert.True(conn.IsUsable);
+        IReadOnlyList<DuckDbChunk> back = await (await conn.ExecuteAsync("SELECT 1")).ToListAsync();
+        Assert.Equal(1, back.Sum(c => c.RowCount));
     }
 
     [Fact]
     public async Task DisposeAsync_AfterCancellation_DoesNotSendDisconnect()
     {
-        // Just exercising that dispose is clean after cancellation; the
-        // server-side session leaks until the query naturally completes
-        // (no in-protocol interrupt), so we only assert no exception.
+        // Just exercising that dispose is clean after cancellation.
         QuackConnection conn = await QuackConnection.OpenAsync(_server.QuackUri, _server.Token);
 
         using CancellationTokenSource cts = new(TimeSpan.FromMilliseconds(100));

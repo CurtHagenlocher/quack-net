@@ -27,12 +27,14 @@ namespace Quack;
 // expired lease aborts the running statement and surfaces as
 // QuackSessionExpiredException.
 //
-// Cancellation: CancelAsync sends a CancelRequest, which interrupts the query
-// on the server. A CancellationToken passed to any *Async method still aborts
-// only the local HTTP wait and marks the transport broken (the request may be
-// half-sent); subsequent *Async calls throw and DisposeAsync skips its
-// DisconnectMessage. To stop a query and keep the connection, call
-// CancelAsync instead of cancelling the token.
+// Cancellation: a CancellationToken passed to ExecuteAsync, AppendAsync or
+// QuackQueryResult.GetChunksAsync cancels the QUERY: the client sends a
+// CancelRequest, the server interrupts the statement, the pending request ends
+// and the call throws OperationCanceledException. The connection stays usable.
+// Only if the server does not end the request within a grace period (10 s) is
+// the HTTP request aborted, which breaks the transport (IsUsable turns false;
+// subsequent calls throw and DisposeAsync skips its DisconnectMessage).
+// CancelAsync sends a CancelRequest directly.
 //
 // Auto-reconnect (opt-in via OpenAsync's autoReconnect parameter): when
 // the server reports the session is gone — an unknown connection_id after a
@@ -74,6 +76,8 @@ public sealed class QuackConnection : IAsyncDisposable
     public QuackUri ServerUri => _transport.Uri;
     public int SessionGeneration => Volatile.Read(ref _sessionGeneration);
     public bool AutoReconnect => _autoReconnect;
+    // False once disposed, or once a request had to be aborted locally.
+    public bool IsUsable => Volatile.Read(ref _disposed) == 0 && !_transport.IsBroken;
 
     internal QuackTransport Transport => _transport;
 
@@ -162,6 +166,7 @@ public sealed class QuackConnection : IAsyncDisposable
         Int128 queryUuid = NewQueryUuid();
         PrepareResponseMessage response = await SendWithReconnectAsync<PrepareResponseMessage>(
             id => new PrepareRequestMessage { ConnectionId = id, SqlQuery = sqlQuery, QueryUuid = queryUuid },
+            queryUuid,
             cancellationToken).ConfigureAwait(false);
 
         // Snapshot ConnectionId after the (possibly retried) send so that
@@ -229,6 +234,7 @@ public sealed class QuackConnection : IAsyncDisposable
 
         _ = await SendWithReconnectAsync<PrepareResponseMessage>(
             id => new PrepareRequestMessage { ConnectionId = id, SqlQuery = sql, QueryUuid = queryUuid, InlineRows = 0 },
+            queryUuid,
             cancellationToken).ConfigureAwait(false);
 
         string connectionId = ConnectionId;
@@ -236,7 +242,8 @@ public sealed class QuackConnection : IAsyncDisposable
         {
             for (int i = 0; i < batches.Count; i++)
             {
-                _ = await _transport.SendAsync<SendDataResponseMessage>(
+                _ = await QueryCancellation.SendAsync<SendDataResponseMessage>(
+                    _transport,
                     new SendDataRequestMessage
                     {
                         ConnectionId = connectionId,
@@ -244,21 +251,29 @@ public sealed class QuackConnection : IAsyncDisposable
                         BatchIndex = (ulong)(i + 1),
                         Chunks = DuckDbChunkSlicer.Split(batches[i]).ToList(),
                     },
-                    cancellationToken).ConfigureAwait(false);
+                    queryUuid,
+                    cancellationToken,
+                    queryStarted: true).ConfigureAwait(false);
             }
-            _ = await _transport.SendAsync<SendDataResponseMessage>(
+            _ = await QueryCancellation.SendAsync<SendDataResponseMessage>(
+                _transport,
                 new SendDataRequestMessage
                 {
                     ConnectionId = connectionId,
                     StreamId = streamId,
                     TotalBatches = (ulong)batches.Count,
                 },
-                cancellationToken).ConfigureAwait(false);
+                queryUuid,
+                cancellationToken,
+                queryStarted: true).ConfigureAwait(false);
 
             // The statement's result is one row: the rows it inserted.
-            FetchResponseMessage result = await _transport.SendAsync<FetchResponseMessage>(
+            FetchResponseMessage result = await QueryCancellation.SendAsync<FetchResponseMessage>(
+                _transport,
                 new FetchRequestMessage { ConnectionId = connectionId, QueryUuid = queryUuid, BatchIndex = 1, AckIndex = 1 },
-                cancellationToken).ConfigureAwait(false);
+                queryUuid,
+                cancellationToken,
+                queryStarted: true).ConfigureAwait(false);
             return ReadRowCount(result);
         }
         catch (Exception) when (!_transport.IsBroken)
@@ -331,6 +346,7 @@ public sealed class QuackConnection : IAsyncDisposable
     // re-doing it.
     private async Task<TResponse> SendWithReconnectAsync<TResponse>(
         Func<string, QuackMessage> buildRequest,
+        Int128 queryUuid,
         CancellationToken cancellationToken)
         where TResponse : QuackMessage
     {
@@ -338,14 +354,14 @@ public sealed class QuackConnection : IAsyncDisposable
         int genAtSend = SessionGeneration;
         try
         {
-            return await _transport.SendAsync<TResponse>(buildRequest(idAtSend), cancellationToken).ConfigureAwait(false);
+            return await QueryCancellation.SendAsync<TResponse>(_transport, buildRequest(idAtSend), queryUuid, cancellationToken, queryStarted: false).ConfigureAwait(false);
         }
         catch (QuackSessionExpiredException) when (_autoReconnect)
         {
             await EnsureReconnectedAsync(genAtSend, cancellationToken).ConfigureAwait(false);
             // Second attempt uses the post-reconnect id. If it fails, throw —
             // we don't loop, to avoid masking a genuine ongoing problem.
-            return await _transport.SendAsync<TResponse>(buildRequest(ConnectionId), cancellationToken).ConfigureAwait(false);
+            return await QueryCancellation.SendAsync<TResponse>(_transport, buildRequest(ConnectionId), queryUuid, cancellationToken, queryStarted: false).ConfigureAwait(false);
         }
     }
 

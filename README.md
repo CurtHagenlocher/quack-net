@@ -40,10 +40,17 @@ The integration tests start the DuckDB CLI named by `QUACK_TEST_DUCKDB`
   heartbeat about every third of that in the background; an expired lease
   surfaces as `QuackSessionExpiredException`.
 - **One statement per connection.** A new query supersedes the one still
-  running on the same connection (it fails with *superseded by a new query*).
-  Use one `QuackConnection` per concurrent query.
-- **Cancel.** `QuackConnection.CancelAsync(queryUuid)` interrupts a query on
-  the server (`QuackQueryResult.QueryUuid`; `Int128.Zero` = whatever runs).
+  running on the same connection (it fails with *superseded by a new query*;
+  with quack `3bc63c0` the newer one can fail too, with *query failed*). Use
+  one `QuackConnection` per concurrent query.
+- **Cancel.** Cancelling the `CancellationToken` of `ExecuteAsync`,
+  `AppendAsync` or `GetChunksAsync` interrupts the query on the server and
+  keeps the connection usable (it throws `OperationCanceledException`). Only
+  if the server does not stop the query within 10 s is the HTTP request
+  aborted, and then the connection is unusable (`QuackConnection.IsUsable`).
+  `QuackConnection.CancelAsync(queryUuid)` sends the interrupt directly
+  (`QuackQueryResult.QueryUuid`; `Int128.Zero` = whatever runs). The ADBC
+  driver's `command_timeout_seconds` uses the same path.
 - **Fetch.** Results arrive in dense, numbered batches (the leading ones inline
   with PREPARE); the client checks the announced batch count and acknowledges
   a complete result.

@@ -69,7 +69,7 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         }
         catch (OperationCanceledException) when (scope.FiredByTimeout)
         {
-            throw new TimeoutException(scope.TimeoutMessage("ExecuteQuery"));
+            throw new TimeoutException(scope.TimeoutMessage("ExecuteQuery", _connection.Underlying.IsUsable));
         }
         return new QueryResult(-1, new QuackArrowArrayStream(result));
     }
@@ -98,7 +98,7 @@ internal sealed class QuackAdbcStatement : AdbcStatement
             }
             catch (OperationCanceledException) when (appendScope.FiredByTimeout)
             {
-                throw new TimeoutException(appendScope.TimeoutMessage("ExecuteUpdate (append)"));
+                throw new TimeoutException(appendScope.TimeoutMessage("ExecuteUpdate (append)", _connection.Underlying.IsUsable));
             }
             long appended = _boundBatch.Length;
             _boundBatch.Dispose();
@@ -128,7 +128,7 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         }
         catch (OperationCanceledException) when (scope.FiredByTimeout)
         {
-            throw new TimeoutException(scope.TimeoutMessage("ExecuteUpdate"));
+            throw new TimeoutException(scope.TimeoutMessage("ExecuteUpdate", _connection.Underlying.IsUsable));
         }
         return new UpdateResult(total == 0 ? -1 : total);
     }
@@ -177,8 +177,11 @@ internal sealed class QuackAdbcStatement : AdbcStatement
 
         public bool FiredByTimeout => _cts is not null && _cts.IsCancellationRequested;
 
-        public string TimeoutMessage(string operation)
-            => $"{operation} exceeded command_timeout_seconds={Timeout!.Value.TotalSeconds:0.###}; the ADBC connection is no longer usable.";
+        public string TimeoutMessage(string operation, bool connectionUsable)
+            => $"{operation} exceeded command_timeout_seconds={Timeout!.Value.TotalSeconds:0.###}; "
+               + (connectionUsable
+                   ? "the query was cancelled on the server and the ADBC connection remains usable."
+                   : "the server did not stop the query in time and the ADBC connection is no longer usable.");
 
         public void Dispose() => _cts?.Dispose();
     }
