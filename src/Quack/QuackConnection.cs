@@ -330,14 +330,30 @@ public sealed class QuackConnection : IAsyncDisposable
                 cancellationToken,
                 queryStarted: true).ConfigureAwait(false);
 
-            // The statement's result is one row: the rows it inserted.
+            // The statement's result is one row: the rows it inserted. Ack 0: the
+            // server drops what is acked before serving, so a retried FETCH that
+            // acked batch 1 would find it gone.
             FetchResponseMessage result = await QueryCancellation.SendAsync<FetchResponseMessage>(
                 _transport,
-                new FetchRequestMessage { ConnectionId = connectionId, QueryUuid = queryUuid, BatchIndex = 1, AckIndex = 1 },
+                new FetchRequestMessage { ConnectionId = connectionId, QueryUuid = queryUuid, BatchIndex = 1, AckIndex = 0 },
                 queryUuid,
                 cancellationToken,
                 queryStarted: true).ConfigureAwait(false);
-            return ReadRowCount(result);
+            long count = ReadRowCount(result);
+            // Read the result to its end and acknowledge it, so the server
+            // releases the statement now rather than at the next query.
+            FetchResponseMessage end = await QueryCancellation.SendAsync<FetchResponseMessage>(
+                _transport,
+                new FetchRequestMessage { ConnectionId = connectionId, QueryUuid = queryUuid, BatchIndex = 2, AckIndex = 1 },
+                queryUuid,
+                cancellationToken,
+                queryStarted: true).ConfigureAwait(false);
+            if (!end.IsEndOfStream)
+            {
+                throw new QuackException("The append statement returned more than its row count.");
+            }
+            await AcknowledgeAsync(connectionId, queryUuid).ConfigureAwait(false);
+            return count;
         }
         catch (Exception) when (!_transport.IsBroken)
         {
@@ -551,6 +567,20 @@ public sealed class QuackConnection : IAsyncDisposable
             sb.Append(' ').Append(LogicalTypeSql.ToSql(types[i]));
         }
         sb.Append("), ordered := true)");
+    }
+
+    // Best effort: the statement is complete, so a failed acknowledgement must not fail it.
+    private async Task AcknowledgeAsync(string connectionId, Int128 queryUuid)
+    {
+        try
+        {
+            _ = await _transport.SendAsync<SuccessResponse>(
+                new AcknowledgementMessage { ConnectionId = connectionId, QueryUuid = queryUuid },
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (QuackException)
+        {
+        }
     }
 
     private static long ReadRowCount(FetchResponseMessage response)

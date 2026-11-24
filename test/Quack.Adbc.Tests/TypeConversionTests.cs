@@ -118,15 +118,23 @@ public class TypeConversionTests : IClassFixture<QuackServerFixture>
     }
 
     [Fact]
-    public async Task Uuid_RoundtripAsFixedSizeBinary16()
+    public async Task Uuid_ArrivesAsItsText()
     {
         using AdbcConnection conn = OpenConnection();
         using AdbcStatement stmt = conn.CreateStatement();
-        stmt.SqlQuery = "SELECT '12345678-1234-1234-1234-123456789abc'::UUID AS u";
+        // The top bit is flipped in DuckDB's storage: cover both halves and the edges.
+        string[] uuids =
+        [
+            "12345678-1234-1234-1234-123456789abc", "00000000-0000-0000-0000-000000000000",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff", "80000000-0000-0000-0000-000000000001",
+            "7fffffff-ffff-ffff-ffff-fffffffffffe",
+        ];
+        stmt.SqlQuery = "SELECT * FROM (VALUES " + string.Join(", ", uuids.Select((u, i) => $"({i}, '{u}'::UUID)")) + ", (99, NULL::UUID)) t(i, u) ORDER BY i";
 
         RecordBatch batch = await ReadFirstBatch(stmt);
-        FixedSizeBinaryArray col = Assert.IsType<FixedSizeBinaryArray>(batch.Column(0));
-        Assert.Equal(16, col.GetBytes(0).Length);
+        StringArray col = Assert.IsType<StringArray>(batch.Column(1));
+        Assert.Equal(uuids, Enumerable.Range(0, uuids.Length).Select(i => col.GetString(i)));
+        Assert.True(col.IsNull(uuids.Length));
     }
 
     [Theory]

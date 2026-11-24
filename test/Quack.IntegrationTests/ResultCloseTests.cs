@@ -54,6 +54,27 @@ public class ResultCloseTests : IClassFixture<QuackServerFixture>
         Assert.Empty(recorder.Cancels());
     }
 
+    // An append fetches its row count without acking it first, reads the
+    // result to its end and acknowledges it.
+    [Fact]
+    public async Task Append_FetchesAcksAndAcknowledges()
+    {
+        Recorder recorder = new();
+        await using QuackConnection conn = await Open(recorder);
+        string table = "ra_" + Guid.NewGuid().ToString("N")[..8];
+        _ = await (await conn.ExecuteAsync($"CREATE TABLE {table} (v BIGINT)")).ToListAsync();
+        QuackQueryResult source = await conn.ExecuteAsync("SELECT range AS v FROM range(5000)");
+        IReadOnlyList<DuckDbChunk> chunks = await source.ToListAsync();
+        recorder.Clear();
+        Assert.Equal(5000, await conn.AppendAsync("main", table, chunks));
+        List<QuackMessage> sent = recorder.Sent();
+        List<(ulong, ulong)> fetches = sent.OfType<FetchRequestMessage>().Select(f => (f.BatchIndex, f.AckIndex)).ToList();
+        Assert.Equal([(1UL, 0UL), (2UL, 1UL)], fetches);
+        Assert.IsType<AcknowledgementMessage>(sent[^1]);
+        Assert.Equal(5000L, await Scalar(conn, $"SELECT count(*)::BIGINT FROM {table}"));
+        _ = await (await conn.ExecuteAsync($"DROP TABLE {table}")).ToListAsync();
+    }
+
     private async Task<QuackConnection> Open(Recorder recorder)
         => await QuackConnection.OpenAsync(QuackUri.Parse(_server.QuackUri), _server.Token, new HttpClient(recorder) { Timeout = Timeout.InfiniteTimeSpan });
 
@@ -70,6 +91,22 @@ public class ResultCloseTests : IClassFixture<QuackServerFixture>
 
         public Recorder() : base(new HttpClientHandler())
         {
+        }
+
+        public void Clear()
+        {
+            lock (_sent)
+            {
+                _sent.Clear();
+            }
+        }
+
+        public List<QuackMessage> Sent()
+        {
+            lock (_sent)
+            {
+                return [.. _sent];
+            }
         }
 
         public List<Int128> Cancels()

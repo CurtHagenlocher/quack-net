@@ -244,23 +244,36 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         // SQL-only path: execute and drain. quack doesn't return an affected-
         // row count, so we report -1 unless rows came back.
         using QuackOperation operation = BeginOperation();
-        long total = 0;
         try
         {
             QuackQueryResult result = _connection.Underlying
                 .ExecuteAsync(SqlQuery, operation.Token)
                 .GetAwaiter()
                 .GetResult();
-            foreach (DuckDbChunk chunk in result.ToListAsync(operation.Token).GetAwaiter().GetResult())
-            {
-                total += chunk.RowCount;
-            }
+            IReadOnlyList<DuckDbChunk> chunks = result.ToListAsync(operation.Token).GetAwaiter().GetResult();
+            return new UpdateResult(AffectedRows(result, chunks));
         }
         catch (OperationCanceledException) when (operation.Token.IsCancellationRequested)
         {
             throw operation.Translate("ExecuteUpdate");
         }
-        return new UpdateResult(total == 0 ? -1 : total);
+    }
+
+    // DuckDB answers INSERT / UPDATE / DELETE (and CREATE TABLE AS) with its own
+    // one-row result, a BIGINT column named Count; quack sends it as the result
+    // when no statement returned rows. Anything else: unknown (-1).
+    private static long AffectedRows(QuackQueryResult result, IReadOnlyList<DuckDbChunk> chunks)
+    {
+        if (result.ColumnNames is ["Count"] && result.ColumnTypes[0].Id == Quack.Types.LogicalTypeId.BigInt
+            && chunks.Sum(c => c.RowCount) == 1)
+        {
+            DuckDbChunk chunk = chunks.First(c => c.RowCount == 1);
+            if (chunk.Columns[0] is FixedSizeColumn count && !count.IsNull(0))
+            {
+                return System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(count.GetBytes(0));
+            }
+        }
+        return -1;
     }
 
     public override void Dispose()

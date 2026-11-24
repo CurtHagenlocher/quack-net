@@ -70,7 +70,8 @@ internal static class ArrowConverter
         // bytes intact and lets consumers re-interpret as needed.
         LogicalTypeId.HugeInt => new Decimal128Type(precision: 38, scale: 0),
         LogicalTypeId.UHugeInt => new FixedSizeBinaryType(16),
-        LogicalTypeId.Uuid => new FixedSizeBinaryType(16),
+        // A string, as DuckDB's own Arrow export (without lossless conversion) sends it.
+        LogicalTypeId.Uuid => StringType.Default,
 
         // DECIMAL maps to Arrow Decimal128 regardless of DuckDB's physical
         // backing (INT16/INT32/INT64/INT128). Smaller widths require
@@ -185,7 +186,8 @@ internal static class ArrowConverter
             // — see HugeintLayout), which matches Arrow Decimal128's
             // little-endian two's-complement value buffer byte-for-byte.
             LogicalTypeId.HugeInt => BuildFixedSize16(new Decimal128Type(38, 0), column, validity, nullCount, rowCount, isDecimal128: true),
-            LogicalTypeId.UHugeInt or LogicalTypeId.Uuid => BuildFixedSize16(new FixedSizeBinaryType(16), column, validity, nullCount, rowCount, isDecimal128: false),
+            LogicalTypeId.UHugeInt => BuildFixedSize16(new FixedSizeBinaryType(16), column, validity, nullCount, rowCount, isDecimal128: false),
+            LogicalTypeId.Uuid => BuildUuidStrings((FixedSizeColumn)column, rowCount),
 
             LogicalTypeId.Decimal => BuildDecimalArray((FixedSizeColumn)column, validity, nullCount, rowCount),
 
@@ -494,11 +496,32 @@ internal static class ArrowConverter
             // months, days: pass through (4 bytes each, same offsets).
             rowSrc[..8].CopyTo(rowDest[..8]);
             long micros = System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(rowSrc.Slice(8, 8));
-            long nanos = checked(micros * 1000L);
+            // Wraps on overflow, as DuckDB's own Arrow export does.
+            long nanos = unchecked(micros * 1000L);
             System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(rowDest.Slice(8, 8), nanos);
         }
         return new MonthDayNanosecondIntervalArray(
             new ArrowBuffer(dest), validity, rowCount, nullCount, 0);
+    }
+
+    // DuckDB keeps a UUID as a hugeint with the top bit flipped (so it sorts as
+    // unsigned); its text is that value's 16 bytes, big-endian.
+    private static StringArray BuildUuidStrings(FixedSizeColumn column, int rowCount)
+    {
+        StringArray.Builder builder = new();
+        Span<byte> bigEndian = stackalloc byte[16];
+        for (int i = 0; i < rowCount; i++)
+        {
+            if (column.IsNull(i))
+            {
+                builder.AppendNull();
+                continue;
+            }
+            UInt128 bits = HugeintLayout.ReadUnsigned(column.GetBytes(i)) ^ ((UInt128)1 << 127);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt128BigEndian(bigEndian, bits);
+            builder.Append(new Guid(bigEndian, bigEndian: true).ToString("D"));
+        }
+        return builder.Build();
     }
 
     private static ArrowBuffer WrapData(DuckDbColumn column)

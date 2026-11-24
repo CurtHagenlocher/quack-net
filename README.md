@@ -139,6 +139,18 @@ QueryResult qr = stmt.ExecuteQuery();
 RecordBatch? batch = await qr.Stream!.ReadNextRecordBatchAsync();
 ```
 
+### Results
+
+- `ExecuteUpdate` returns DuckDB's own row count for INSERT, UPDATE, DELETE
+  and CREATE TABLE AS, and -1 when the statement reports none (DDL, a query).
+- UUID arrives as its text, as DuckDB's own Arrow export sends it. On ingest,
+  `arrow.uuid` becomes a UUID and any other fixed-size binary a BLOB.
+- INTERVAL is `month_day_nano`; microseconds beyond the nanosecond range wrap,
+  as in DuckDB's export.
+- A result type without an Arrow mapping (BIGNUM) fails with
+  `ADBC_STATUS_NOT_IMPLEMENTED`; the query is cancelled on the server and the
+  connection stays usable. So is any result that is released before its end.
+
 ### Bulk ingest
 
 ADBC's standard bulk ingest: set `adbc.ingest.target_table` (plus, as

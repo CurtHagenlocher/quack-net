@@ -54,9 +54,10 @@ internal static class RecordBatchConverter
         Date32Type => new LogicalType(LogicalTypeId.Date),
         Decimal128Type dt => new LogicalType(LogicalTypeId.Decimal,
             new DecimalTypeInfo { Width = (byte)dt.Precision, Scale = (byte)dt.Scale }),
-        // FixedSizeBinary(16) is ambiguous between UUID, UHUGEINT, and HUGEINT.
-        // Default to UUID; users wanting another can build the chunk via Quack.
-        FixedSizeBinaryType fb when fb.ByteWidth == 16 => new LogicalType(LogicalTypeId.Uuid),
+        // arrow.uuid is a UUID; any other fixed-size binary is a BLOB, as DuckDB
+        // reads it.
+        GuidType => new LogicalType(LogicalTypeId.Uuid),
+        FixedSizeBinaryType => new LogicalType(LogicalTypeId.Blob),
         StringType => new LogicalType(LogicalTypeId.Varchar),
         BinaryType => new LogicalType(LogicalTypeId.Blob),
         Time64Type t when t.Unit == TimeUnit.Microsecond => new LogicalType(LogicalTypeId.Time),
@@ -159,7 +160,8 @@ internal static class RecordBatchConverter
             // Decimal128Array : FixedSizeBinaryArray, MapArray : ListArray —
             // the subclass arms must come before their base-class arms.
             Decimal128Array a => NarrowDecimal(a, targetType, rowCount, validity),
-            FixedSizeBinaryArray a => Fixed(a.Data, targetType, rowCount, ((FixedSizeBinaryType)a.Data.DataType).ByteWidth, validity),
+            FixedSizeBinaryArray a => FixedToBlobs(a, targetType, rowCount, validity),
+            GuidArray a => Uuids(a, targetType, rowCount, validity),
             BooleanArray a => UnpackBoolean(a, targetType, rowCount, validity),
             MonthDayNanosecondIntervalArray a => IntervalNanosToMicros(a, targetType, rowCount, validity),
             StringArray a => BuildVarBytes(a, targetType, rowCount, validity),
@@ -316,6 +318,37 @@ internal static class RecordBatchConverter
             Data = dest,
             Validity = validity,
         };
+    }
+
+    // A fixed-size binary as a BLOB: one slice of the value buffer per row.
+    private static VarBytesColumn FixedToBlobs(FixedSizeBinaryArray array, LogicalType type, int rowCount, ValidityMask validity)
+    {
+        int width = ((FixedSizeBinaryType)array.Data.DataType).ByteWidth;
+        ReadOnlyMemory<byte> bytes = array.Data.Buffers[1].Memory;
+        int o = array.Data.Offset;
+        ReadOnlyMemory<byte>?[] values = new ReadOnlyMemory<byte>?[rowCount];
+        for (int i = 0; i < rowCount; i++)
+        {
+            values[i] = array.IsNull(i) ? null : bytes.Slice((o + i) * width, width);
+        }
+        return new VarBytesColumn { Type = type, Count = rowCount, Values = values, Validity = validity };
+    }
+
+    // arrow.uuid holds RFC 4122 bytes; DuckDB a hugeint with the top bit flipped.
+    private static FixedSizeColumn Uuids(GuidArray array, LogicalType type, int rowCount, ValidityMask validity)
+    {
+        byte[] data = new byte[rowCount * HugeintLayout.ByteSize];
+        Span<byte> bigEndian = stackalloc byte[16];
+        for (int i = 0; i < rowCount; i++)
+        {
+            if (array.GetGuid(i) is Guid guid)
+            {
+                guid.TryWriteBytes(bigEndian, bigEndian: true, out _);
+                UInt128 bits = System.Buffers.Binary.BinaryPrimitives.ReadUInt128BigEndian(bigEndian) ^ ((UInt128)1 << 127);
+                HugeintLayout.WriteUnsigned(data.AsSpan(i * HugeintLayout.ByteSize, HugeintLayout.ByteSize), bits);
+            }
+        }
+        return new FixedSizeColumn { Type = type, Count = rowCount, ElementSize = HugeintLayout.ByteSize, Data = data, Validity = validity };
     }
 
     private static VarBytesColumn BuildVarBytes<TArr>(TArr array, LogicalType type, int rowCount, ValidityMask validity)
