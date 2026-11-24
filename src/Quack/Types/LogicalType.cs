@@ -94,6 +94,8 @@ public sealed class LogicalType : IEquatable<LogicalType>
             case LogicalTypeId.Blob:
             case LogicalTypeId.Bit:
             case LogicalTypeId.Geometry:
+            // DuckDB's own varint encoding, carried as a string_t.
+            case LogicalTypeId.BigNum:
                 return PhysicalType.Varchar;
             case LogicalTypeId.List:
             case LogicalTypeId.Map:

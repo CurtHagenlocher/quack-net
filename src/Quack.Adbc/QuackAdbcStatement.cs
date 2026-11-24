@@ -139,7 +139,17 @@ internal sealed class QuackAdbcStatement : AdbcStatement
             throw;
         }
         operation.StopTimeout();
-        return new QueryResult(-1, new QuackArrowArrayStream(result, operation));
+        try
+        {
+            return new QueryResult(-1, new QuackArrowArrayStream(result, operation));
+        }
+        catch (NotSupportedException e)
+        {
+            // A result type without an Arrow mapping: end the query on the server.
+            result.CloseAsync().GetAwaiter().GetResult();
+            operation.Dispose();
+            throw new AdbcException(e.Message, AdbcStatusCode.NotImplemented);
+        }
     }
 
     // ADBC 1.1: the result schema without running the statement. The query is
@@ -259,6 +269,8 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         {
             _disposed = true;
             ReleaseBound();
+            // A result stream left undisposed no longer keeps its operation registered.
+            _connection.ForgetOperations(this);
         }
         base.Dispose();
     }

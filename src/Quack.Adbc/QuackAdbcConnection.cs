@@ -66,6 +66,15 @@ internal sealed class QuackAdbcConnection : AdbcConnection
         }
     }
 
+    // Drops owner's operations from the registry, without cancelling them.
+    internal void ForgetOperations(object owner)
+    {
+        lock (_operationsLock)
+        {
+            _operations.RemoveWhere(operation => ReferenceEquals(operation.Owner, owner));
+        }
+    }
+
     // Cancels the running operations of owner, or all of them for null.
     internal void CancelOperations(object? owner)
     {

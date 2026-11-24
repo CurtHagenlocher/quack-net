@@ -104,6 +104,68 @@ public class Adbc11Tests : IClassFixture<QuackServerFixture>
         Assert.Equal(1, ScalarInt(conn, "SELECT 1"));
     }
 
+    // An unsupported result type fails with NOT_IMPLEMENTED, and the query is
+    // closed on the server, so the connection goes on.
+    [Fact]
+    public void UnsupportedType_IsNotImplemented_AndTheConnectionGoesOn()
+    {
+        using AdbcConnection conn = OpenConnection();
+        using (AdbcStatement stmt = conn.CreateStatement())
+        {
+            stmt.SqlQuery = "SELECT 1::BIGNUM AS b";
+            Assert.Equal(AdbcStatusCode.NotImplemented, Assert.Throws<AdbcException>(() => ReadAll(stmt.ExecuteQuery())).Status);
+        }
+        Assert.Equal(1, ScalarInt(conn, "SELECT 1"));
+    }
+
+    // A result stream read to its end, or left with its statement, does not
+    // stay registered with the connection.
+    [Fact]
+    public async Task FinishedOrOrphanedResults_LeaveNoOperations()
+    {
+        using AdbcConnection conn = OpenConnection();
+        System.Reflection.FieldInfo field = typeof(QuackAdbcConnection).GetField("_operations", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        int Count()
+        {
+            object set = field.GetValue(conn)!;
+            return (int)set.GetType().GetProperty("Count")!.GetValue(set)!;
+        }
+        for (int i = 0; i < 5; i++)
+        {
+            AdbcStatement stmt = conn.CreateStatement();
+            stmt.SqlQuery = "SELECT 1";
+            IArrowArrayStream stream = stmt.ExecuteQuery().Stream!;
+            while (await stream.ReadNextRecordBatchAsync() is not null) { }
+            // Read to its end, neither the stream nor the statement disposed yet.
+            Assert.Equal(0, Count());
+            stmt.Dispose();
+        }
+        for (int i = 0; i < 5; i++)
+        {
+            using AdbcStatement stmt = conn.CreateStatement();
+            stmt.SqlQuery = "SELECT 1";
+            _ = stmt.ExecuteQuery();
+        }
+        Assert.Equal(0, Count());
+    }
+
+    // A result stream disposed without being read closes its query on the
+    // server (the CANCEL itself is covered by ResultCloseTests).
+    [Fact]
+    public void DisposedUnreadStream_ClosesItsResult()
+    {
+        using AdbcConnection conn = OpenConnection();
+        using AdbcStatement stmt = conn.CreateStatement();
+        stmt.SqlQuery = "SELECT hash(range) FROM range(20000000)";
+        IArrowArrayStream stream = stmt.ExecuteQuery().Stream!;
+        object result = typeof(QuackArrowArrayStream).GetField("_result", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(stream)!;
+        System.Reflection.FieldInfo closed = result.GetType().GetField("_closed", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        Assert.Equal(0, closed.GetValue(result));
+        stream.Dispose();
+        Assert.Equal(1, closed.GetValue(result));
+        Assert.Equal(1, ScalarInt(conn, "SELECT 1"));
+    }
+
     [Fact]
     public void StatementGetOption_ReturnsWhatWasSet()
     {

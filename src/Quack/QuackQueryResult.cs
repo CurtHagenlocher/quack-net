@@ -18,7 +18,10 @@ namespace Quack;
 // replay can drop this one.
 //
 // Cancelling the token passed to GetChunksAsync/ToListAsync cancels the query
-// on the server and keeps the connection usable (see QuackConnection).
+// on the server and keeps the connection usable (see QuackConnection). A
+// result that is left before its end (the reader stops, or fails on a chunk)
+// is closed: the query is cancelled on the server, which would otherwise keep
+// producing into its buffer. CloseAsync does that for a result never read.
 public sealed class QuackQueryResult
 {
     private readonly QuackTransport _transport;
@@ -26,6 +29,7 @@ public sealed class QuackQueryResult
     private readonly IReadOnlyList<DuckDbChunk> _firstBatch;
     private readonly bool _needsMoreFetch;
     private readonly Int128 _queryUuid;
+    private int _closed;
 
     public IReadOnlyList<LogicalType> ColumnTypes { get; }
     public IReadOnlyList<string> ColumnNames { get; }
@@ -51,6 +55,53 @@ public sealed class QuackQueryResult
 
     public async IAsyncEnumerable<DuckDbChunk> GetChunksAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        bool complete = false;
+        try
+        {
+            await foreach (DuckDbChunk chunk in ReadChunksAsync(cancellationToken).ConfigureAwait(false))
+            {
+                yield return chunk;
+            }
+            complete = true;
+        }
+        finally
+        {
+            if (!complete)
+            {
+                await CloseAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
+    // Ends a result that was not read to its end: cancels the query on the
+    // server (or, when the whole result came with the prepare response,
+    // acknowledges it). Best effort and idempotent; a no-op after a full read.
+    public async Task CloseAsync()
+    {
+        if (Interlocked.Exchange(ref _closed, 1) != 0 || _transport.IsBroken)
+        {
+            return;
+        }
+        if (!_needsMoreFetch)
+        {
+            await SendAcknowledgementAsync().ConfigureAwait(false);
+            return;
+        }
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(10));
+        try
+        {
+            await _transport.SendAsync<SuccessResponse>(
+                new CancelRequestMessage { ConnectionId = _connectionId, QueryUuid = _queryUuid },
+                timeout.Token).ConfigureAwait(false);
+        }
+        catch (Exception e) when (e is QuackException or OperationCanceledException or HttpRequestException)
+        {
+            // The query may have ended or been superseded meanwhile.
+        }
+    }
+
+    private async IAsyncEnumerable<DuckDbChunk> ReadChunksAsync([EnumeratorCancellation] CancellationToken cancellationToken)
     {
         foreach (DuckDbChunk chunk in _firstBatch)
         {
@@ -114,10 +165,15 @@ public sealed class QuackQueryResult
     // not fail the read.
     private async Task AcknowledgeAsync()
     {
-        if (_transport.IsBroken)
+        if (Interlocked.Exchange(ref _closed, 1) != 0 || _transport.IsBroken)
         {
             return;
         }
+        await SendAcknowledgementAsync().ConfigureAwait(false);
+    }
+
+    private async Task SendAcknowledgementAsync()
+    {
         try
         {
             await _transport.SendAsync<SuccessResponse>(

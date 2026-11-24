@@ -187,7 +187,8 @@ public class VariantAdbcTests : IClassFixture<QuackServerFixture>
     {
         using AdbcConnection conn = OpenConnection();
         Exception ex = await Assert.ThrowsAnyAsync<Exception>(() => QueryVariant(conn, $"SELECT ({sql})::VARIANT AS v"));
-        Assert.True(ex is NotSupportedException or OverflowException, ex.ToString());
+        // A type the Parquet Variant spec cannot express is NOT_IMPLEMENTED; a value out of its range overflows.
+        Assert.True(ex is AdbcException { Status: AdbcStatusCode.NotImplemented } or OverflowException, ex.ToString());
     }
 
     private static async Task<VariantArray> QueryVariant(AdbcConnection conn, string sql)

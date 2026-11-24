@@ -52,6 +52,8 @@ internal sealed class QuackArrowArrayStream : IArrowArrayStream
         {
             if (!await _enumerator.MoveNextAsync().ConfigureAwait(false))
             {
+                // The result is complete: the operation has nothing left to cancel.
+                _operation?.Dispose();
                 return null;
             }
         }
@@ -60,7 +62,15 @@ internal sealed class QuackArrowArrayStream : IArrowArrayStream
             throw _operation.Translate("Reading the result");
         }
         DuckDbChunk chunk = _enumerator.Current;
-        return ArrowConverter.ToRecordBatch(_schema, chunk);
+        try
+        {
+            return ArrowConverter.ToRecordBatch(_schema, chunk);
+        }
+        catch (NotSupportedException e)
+        {
+            await _result.CloseAsync().ConfigureAwait(false);
+            throw new Apache.Arrow.Adbc.AdbcException(e.Message, Apache.Arrow.Adbc.AdbcStatusCode.NotImplemented);
+        }
     }
 
     public void Dispose()
@@ -75,6 +85,8 @@ internal sealed class QuackArrowArrayStream : IArrowArrayStream
             _enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult();
             _enumerator = null;
         }
+        // A result not read to its end is cancelled on the server.
+        _result.CloseAsync().GetAwaiter().GetResult();
         _linked?.Dispose();
         _operation?.Dispose();
     }
