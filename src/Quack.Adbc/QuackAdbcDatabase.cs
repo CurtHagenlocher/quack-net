@@ -87,6 +87,17 @@ internal sealed class QuackAdbcDatabase : AdbcDatabase
         _options[key] = value;
     }
 
+    // The options as set; the token is write-only.
+    public override string GetOption(string key)
+    {
+        if (!string.Equals(key, QuackAdbcDriver.TokenParameter, StringComparison.Ordinal) &&
+            _options.TryGetValue(key, out string? value))
+        {
+            return value;
+        }
+        throw new AdbcException($"Option '{key}' is not set or can't be read.", AdbcStatusCode.NotFound);
+    }
+
     internal static TimeSpan ParseCommandTimeoutSeconds(string text)
     {
         if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double seconds) ||

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import socket
+import threading
 import subprocess
 import sys
 import time
@@ -165,6 +166,49 @@ def run_smoke_test(dll: Path, duckdb_exe: Path) -> None:
             assert rows("SELECT id, name FROM ingested2") == [(100, "n100")]
             assert rows("SELECT count(*) FROM temp.main.tmp_ingest") == [(2,)]
             print("[smoke] adbc_ingest create/append/create_append/replace/temporary -> ok", flush=True)
+
+            # 6) ADBC 1.1 through the C API.
+            assert info.get("driver_adbc_version") == 1_001_000, info.get("driver_adbc_version")
+            with conn.cursor() as cur:
+                cur.adbc_statement.set_options(**{"adbc.ingest.target_table": "t"})
+                assert cur.adbc_statement.get_option("adbc.ingest.target_table") == "t"
+            assert conn.adbc_connection.get_option("adbc.connection.catalog") == "memory"
+            with conn.cursor() as cur:
+                cur.execute("CREATE SCHEMA smoke_s")
+            conn.adbc_connection.set_options(**{"adbc.connection.db_schema": "smoke_s"})
+            assert conn.adbc_connection.get_option("adbc.connection.db_schema") == "smoke_s"
+            assert rows("SELECT current_schema()") == [("smoke_s",)]
+            conn.adbc_connection.set_options(**{"adbc.connection.db_schema": "main"})
+            with conn.cursor() as cur:
+                schema = cur.adbc_execute_schema("SELECT 1::INTEGER AS a, 'x' AS b")
+                assert [(f.name, str(f.type)) for f in schema] == [("a", "int32"), ("b", "string")], schema
+            handle = conn.adbc_connection.get_statistics(None, "main", "ingested", True)
+            stats = pa.RecordBatchReader._import_from_c(handle.address).read_all()
+            catalogs = stats.to_pylist()
+            assert catalogs[0]["catalog_db_schemas"][0]["db_schema_statistics"][0]["statistic_key"] == 6, catalogs
+
+            # Cancel from another thread while the query runs.
+            with conn.cursor() as cur:
+                failure: list[BaseException] = []
+
+                def run() -> None:
+                    try:
+                        cur.execute("SELECT sum(a.range * b.range) FROM range(1000000) a, range(1000000) b")
+                        cur.fetchall()
+                    except BaseException as e:  # noqa: BLE001
+                        failure.append(e)
+
+                worker = threading.Thread(target=run)
+                worker.start()
+                deadline = time.monotonic() + 30
+                while worker.is_alive() and time.monotonic() < deadline:
+                    time.sleep(0.2)
+                    cur.adbc_cancel()
+                worker.join(30)
+                assert not worker.is_alive(), "cancel did not stop the query"
+                assert failure and "CANCELLED" in str(failure[0]).upper(), failure
+            assert rows("SELECT 42") == [(42,)]
+            print("[smoke] ADBC 1.1 (version, GetOption, catalog/schema, ExecuteSchema, statistics, cancel) -> ok", flush=True)
 
         print("[smoke] ALL CHECKS PASSED", flush=True)
     finally:

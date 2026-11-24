@@ -16,12 +16,16 @@ internal sealed class QuackArrowArrayStream : IArrowArrayStream
 {
     private readonly QuackQueryResult _result;
     private readonly Schema _schema;
+    // The statement's operation: a StatementCancel or ConnectionCancel stops the reads.
+    private readonly QuackOperation? _operation;
+    private CancellationTokenSource? _linked;
     private IAsyncEnumerator<DuckDbChunk>? _enumerator;
     private bool _disposed;
 
-    public QuackArrowArrayStream(QuackQueryResult result)
+    public QuackArrowArrayStream(QuackQueryResult result, QuackOperation? operation = null)
     {
         _result = result;
+        _operation = operation;
         _schema = ArrowConverter.BuildSchema(result.ColumnNames, result.ColumnTypes);
     }
 
@@ -33,11 +37,27 @@ internal sealed class QuackArrowArrayStream : IArrowArrayStream
         {
             throw new ObjectDisposedException(nameof(QuackArrowArrayStream));
         }
-        _enumerator ??= _result.GetChunksAsync(cancellationToken).GetAsyncEnumerator(cancellationToken);
-
-        if (!await _enumerator.MoveNextAsync().ConfigureAwait(false))
+        if (_enumerator is null)
         {
-            return null;
+            CancellationToken token = cancellationToken;
+            if (_operation is not null)
+            {
+                _linked = CancellationTokenSource.CreateLinkedTokenSource(_operation.Token, cancellationToken);
+                token = _linked.Token;
+            }
+            _enumerator = _result.GetChunksAsync(token).GetAsyncEnumerator(token);
+        }
+
+        try
+        {
+            if (!await _enumerator.MoveNextAsync().ConfigureAwait(false))
+            {
+                return null;
+            }
+        }
+        catch (OperationCanceledException) when (_operation is { WasCancelled: true })
+        {
+            throw _operation.Translate("Reading the result");
         }
         DuckDbChunk chunk = _enumerator.Current;
         return ArrowConverter.ToRecordBatch(_schema, chunk);
@@ -55,5 +75,7 @@ internal sealed class QuackArrowArrayStream : IArrowArrayStream
             _enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult();
             _enumerator = null;
         }
+        _linked?.Dispose();
+        _operation?.Dispose();
     }
 }

@@ -117,21 +117,102 @@ internal sealed class QuackAdbcStatement : AdbcStatement
             throw new InvalidOperationException("SqlQuery must be set before calling ExecuteQuery.");
         }
 
-        using TimeoutScope scope = OpenTimeoutScope();
+        // The operation lives on in the result stream, so a cancel also stops
+        // reading; the timeout covers getting the first response only.
+        QuackOperation operation = BeginOperation();
         QuackQueryResult result;
         try
         {
             result = _connection.Underlying
-                .ExecuteAsync(SqlQuery, scope.Token)
+                .ExecuteAsync(SqlQuery, operation.Token)
                 .GetAwaiter()
                 .GetResult();
         }
-        catch (OperationCanceledException) when (scope.FiredByTimeout)
+        catch (OperationCanceledException) when (operation.Token.IsCancellationRequested)
         {
-            throw new TimeoutException(scope.TimeoutMessage("ExecuteQuery", _connection.Underlying.IsUsable));
+            operation.Dispose();
+            throw operation.Translate("ExecuteQuery");
         }
-        return new QueryResult(-1, new QuackArrowArrayStream(result));
+        catch
+        {
+            operation.Dispose();
+            throw;
+        }
+        operation.StopTimeout();
+        return new QueryResult(-1, new QuackArrowArrayStream(result, operation));
     }
+
+    // ADBC 1.1: the result schema without running the statement. The query is
+    // wrapped as SELECT * FROM (query) LIMIT 0, which DuckDB plans as an empty
+    // result, and which is a parser error for anything that is not a query, so
+    // a statement with side effects is never executed.
+    public override Schema ExecuteSchema()
+    {
+        ThrowIfDisposed();
+        if (_boundBatch is not null || _boundStream is not null || _ingestTable is not null)
+        {
+            throw new InvalidOperationException("ExecuteSchema does not apply to an ingest.");
+        }
+        if (string.IsNullOrEmpty(SqlQuery))
+        {
+            throw new InvalidOperationException("SqlQuery must be set before calling ExecuteSchema.");
+        }
+        string query = SqlQuery.TrimEnd();
+        while (query.EndsWith(';'))
+        {
+            query = query[..^1].TrimEnd();
+        }
+
+        using QuackOperation operation = BeginOperation();
+        try
+        {
+            QuackQueryResult result = _connection.Underlying
+                .ExecuteAsync($"SELECT * FROM (\n{query}\n) LIMIT 0", operation.Token)
+                .GetAwaiter()
+                .GetResult();
+            _ = result.ToListAsync(operation.Token).GetAwaiter().GetResult();
+            return ArrowConverter.BuildSchema(result.ColumnNames, result.ColumnTypes);
+        }
+        catch (OperationCanceledException) when (operation.Token.IsCancellationRequested)
+        {
+            throw operation.Translate("ExecuteSchema");
+        }
+    }
+
+    // ADBC 1.1 StatementCancel: stops this statement's running query, ingest
+    // or result stream; the server cancels the query.
+    public override void Cancel()
+    {
+        ThrowIfDisposed();
+        _connection.CancelOperations(this);
+    }
+
+    public override string GetOption(string key)
+    {
+        ThrowIfDisposed();
+        if (string.Equals(key, QuackAdbcDriver.CommandTimeoutSecondsParameter, StringComparison.Ordinal))
+        {
+            TimeSpan? timeout = _commandTimeoutOverrideSet ? _commandTimeoutOverride : _connection.DefaultCommandTimeout;
+            return timeout is null ? "" : timeout.Value.TotalSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        return key switch
+        {
+            IngestTargetTableOption => _ingestTable ?? throw NotSet(key),
+            IngestTargetCatalogOption => _ingestCatalog ?? throw NotSet(key),
+            IngestTargetDbSchemaOption => _ingestSchema ?? throw NotSet(key),
+            IngestTemporaryOption => _ingestTemporary ? "true" : "false",
+            IngestModeOption => _ingestMode switch
+            {
+                IngestMode.Append => "adbc.ingest.mode.append",
+                IngestMode.Replace => "adbc.ingest.mode.replace",
+                IngestMode.CreateAppend => "adbc.ingest.mode.create_append",
+                _ => "adbc.ingest.mode.create",
+            },
+            _ => base.GetOption(key),
+        };
+    }
+
+    private static AdbcException NotSet(string key) => new($"Option '{key}' is not set.", AdbcStatusCode.NotFound);
 
     public override UpdateResult ExecuteUpdate()
     {
@@ -152,22 +233,22 @@ internal sealed class QuackAdbcStatement : AdbcStatement
 
         // SQL-only path: execute and drain. quack doesn't return an affected-
         // row count, so we report -1 unless rows came back.
-        using TimeoutScope scope = OpenTimeoutScope();
+        using QuackOperation operation = BeginOperation();
         long total = 0;
         try
         {
             QuackQueryResult result = _connection.Underlying
-                .ExecuteAsync(SqlQuery, scope.Token)
+                .ExecuteAsync(SqlQuery, operation.Token)
                 .GetAwaiter()
                 .GetResult();
-            foreach (DuckDbChunk chunk in result.ToListAsync(scope.Token).GetAwaiter().GetResult())
+            foreach (DuckDbChunk chunk in result.ToListAsync(operation.Token).GetAwaiter().GetResult())
             {
                 total += chunk.RowCount;
             }
         }
-        catch (OperationCanceledException) when (scope.FiredByTimeout)
+        catch (OperationCanceledException) when (operation.Token.IsCancellationRequested)
         {
-            throw new TimeoutException(scope.TimeoutMessage("ExecuteUpdate", _connection.Underlying.IsUsable));
+            throw operation.Translate("ExecuteUpdate");
         }
         return new UpdateResult(total == 0 ? -1 : total);
     }
@@ -217,18 +298,18 @@ internal sealed class QuackAdbcStatement : AdbcStatement
             Schema schema = batch?.Schema ?? stream!.Schema;
             List<string> names = schema.FieldsList.Select(f => f.Name).ToList();
             List<LogicalType> types = schema.FieldsList.Select(f => RecordBatchConverter.MapType(f.DataType)).ToList();
-            using TimeoutScope scope = OpenTimeoutScope();
+            using QuackOperation operation = BeginOperation();
             try
             {
                 long rows = _connection.Underlying
-                    .IngestAsync(target, names, types, Chunks(batch, stream, scope.Token), scope.Token)
+                    .IngestAsync(target, names, types, Chunks(batch, stream, operation.Token), operation.Token)
                     .GetAwaiter()
                     .GetResult();
                 return new UpdateResult(rows);
             }
-            catch (OperationCanceledException) when (scope.FiredByTimeout)
+            catch (OperationCanceledException) when (operation.Token.IsCancellationRequested)
             {
-                throw new TimeoutException(scope.TimeoutMessage("ExecuteUpdate (ingest)", _connection.Underlying.IsUsable));
+                throw operation.Translate("ExecuteUpdate (ingest)");
             }
         }
         finally
@@ -283,37 +364,6 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         }
     }
 
-    private TimeoutScope OpenTimeoutScope()
-    {
-        TimeSpan? effective = _commandTimeoutOverrideSet
-            ? _commandTimeoutOverride
-            : _connection.DefaultCommandTimeout;
-        return new TimeoutScope(effective);
-    }
-
-    // Bundles the CTS lifecycle so callers can `using` it and ask whether
-    // a thrown OperationCanceledException originated from the timeout.
-    private readonly struct TimeoutScope : IDisposable
-    {
-        private readonly CancellationTokenSource? _cts;
-        public TimeSpan? Timeout { get; }
-
-        public TimeoutScope(TimeSpan? timeout)
-        {
-            Timeout = timeout;
-            _cts = timeout is null ? null : new CancellationTokenSource(timeout.Value);
-        }
-
-        public CancellationToken Token => _cts?.Token ?? CancellationToken.None;
-
-        public bool FiredByTimeout => _cts is not null && _cts.IsCancellationRequested;
-
-        public string TimeoutMessage(string operation, bool connectionUsable)
-            => $"{operation} exceeded command_timeout_seconds={Timeout!.Value.TotalSeconds:0.###}; "
-               + (connectionUsable
-                   ? "the query was cancelled on the server and the ADBC connection remains usable."
-                   : "the server did not stop the query in time and the ADBC connection is no longer usable.");
-
-        public void Dispose() => _cts?.Dispose();
-    }
+    private QuackOperation BeginOperation()
+        => _connection.BeginOperation(this, _commandTimeoutOverrideSet ? _commandTimeoutOverride : _connection.DefaultCommandTimeout);
 }

@@ -110,12 +110,12 @@ await using QuackConnection conn = await QuackConnection.OpenAsync(
     token: "your-token");
 
 QuackQueryResult result = await conn.ExecuteAsync(
-    "SELECT id, name FROM users WHERE id < ?",
-    parameters: [10]);
+    "SELECT id, name FROM users WHERE id < 10");
 
-await foreach (DuckDbChunk chunk in result.ReadChunksAsync())
+await foreach (DuckDbChunk chunk in result.GetChunksAsync())
 {
-    // chunk.RowCount, chunk.Columns[0] as IntegerColumn, etc.
+    // chunk.RowCount; chunk.Columns[0] is a FixedSizeColumn (INTEGER),
+    // chunk.Columns[1] a VarBytesColumn (VARCHAR, UTF-8 bytes).
 }
 ```
 
@@ -172,6 +172,29 @@ can't be combined with a catalog or schema.
 
 The older form still works: without `adbc.ingest.target_table`, a bound batch
 or stream is appended to the existing table that `SqlQuery` names.
+
+### ADBC 1.1
+
+The driver implements ADBC API revision 1.1.0 (and still answers a 1.0.0
+driver manager):
+
+- `StatementCancel` stops the statement's running query, ingest or result
+  stream, and `ConnectionCancel` everything running on the connection; the
+  query is cancelled on the server, the call fails with `ADBC_STATUS_CANCELLED`
+  and the connection stays usable. `command_timeout_seconds` uses the same path.
+- `GetOption` returns the statement's ingest options and timeout, and the
+  database's options except the token.
+- `adbc.connection.catalog` and `adbc.connection.db_schema` read
+  `current_database()` / `current_schema()` and set them with `USE`.
+- `ExecuteSchema` describes a query without running it (as
+  `SELECT * FROM (<query>) LIMIT 0`, which DuckDB answers without a scan and
+  which refuses any statement that is not a query).
+- `GetStatistics` returns a row count per table (`adbc.statistic.row_count`)
+  from DuckDB's estimate, marked approximate; there are no driver-specific
+  statistics.
+
+Not implemented: transactions (Commit, Rollback, turning autocommit off),
+partitioned results, prepared statements with parameters, and error details.
 
 ## Using the native library from Python (or any ADBC C-API consumer)
 

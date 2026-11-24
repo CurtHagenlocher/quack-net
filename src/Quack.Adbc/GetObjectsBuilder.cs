@@ -32,9 +32,7 @@ internal static class GetObjectsBuilder
 
         // Run the query through quack-net directly; bypassing the ADBC layer
         // here avoids reentrant Arrow conversion of system-catalog rows.
-        QuackQueryResult result = connection.Underlying.ExecuteAsync(sql)
-            .GetAwaiter().GetResult();
-        IReadOnlyList<Data.DuckDbChunk> chunks = result.ToListAsync().GetAwaiter().GetResult();
+        IReadOnlyList<Data.DuckDbChunk> chunks = connection.RunQuery(sql, out _, "GetObjects");
 
         Catalog[] catalogs = WalkChunks(chunks, depth);
 

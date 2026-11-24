@@ -143,7 +143,6 @@ internal static class GetInfoBuilder
     {
         Assembly driverAsm = typeof(GetInfoBuilder).Assembly;
         Assembly arrowAsm = typeof(RecordBatch).Assembly;
-        Assembly adbcAsm = typeof(AdbcConnection).Assembly;
         return new Dictionary<AdbcInfoCode, object>
         {
             [AdbcInfoCode.VendorName] = "DuckDB",
@@ -154,7 +153,8 @@ internal static class GetInfoBuilder
             [AdbcInfoCode.DriverName] = "quack-net ADBC",
             [AdbcInfoCode.DriverVersion] = AssemblyVersion(driverAsm),
             [AdbcInfoCode.DriverArrowVersion] = AssemblyVersion(arrowAsm),
-            [AdbcInfoCode.DriverAdbcVersion] = AssemblyVersion(adbcAsm),
+            // The ADBC API revision the driver implements (ADBC_VERSION_1_1_0).
+            [AdbcInfoCode.DriverAdbcVersion] = 1_001_000L,
         };
     }
 
