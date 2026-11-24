@@ -141,9 +141,25 @@ public sealed class QuackConnection : IAsyncDisposable
             HeartbeatTimeoutSeconds = options.HeartbeatTimeoutSeconds,
         };
 
-        ConnectionResponseMessage response = await transport
-            .SendAsync<ConnectionResponseMessage>(request, cancellationToken)
-            .ConfigureAwait(false);
+        ConnectionResponseMessage response;
+        try
+        {
+            response = await transport
+                .SendAsync<ConnectionResponseMessage>(request, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (QuackException ex) when (ex.HttpStatusCode == 500)
+        {
+            // Measured: a DuckDB 1.5 server (quack protocol version 1) cannot
+            // read this handshake and answers HTTP 500 without an ErrorResponse.
+            throw new QuackException(
+                $"{ex.Message} The server could not read the handshake; a DuckDB 1.5 server (quack protocol "
+                + $"version 1) answers this way. This client speaks quack protocol version {ProtocolVersion} (DuckDB 2.0).",
+                ex)
+            {
+                HttpStatusCode = ex.HttpStatusCode,
+            };
+        }
 
         if (response.QuackVersion != ProtocolVersion)
         {

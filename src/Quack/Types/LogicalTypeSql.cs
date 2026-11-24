@@ -86,6 +86,17 @@ internal static class LogicalTypeSql
                 sb.Append(')');
                 return;
             case LogicalTypeId.Struct when type.TypeInfo is StructTypeInfo st:
+                if (st.ChildTypes.Count > 0 && st.ChildTypes.All(c => c.Key.Length == 0))
+                {
+                    // DuckDB 2.0 reads an all-unnamed STRUCT as TUPLE.
+                    AppendMembers(sb, "TUPLE(", st.ChildTypes, skip: 0, named: false);
+                    return;
+                }
+                if (st.ChildTypes.Any(c => c.Key.Length == 0))
+                {
+                    throw new NotSupportedException(
+                        $"STRUCT '{type}' mixes named and unnamed fields, which DuckDB cannot declare.");
+                }
                 AppendMembers(sb, "STRUCT(", st.ChildTypes, skip: 0, named: true);
                 return;
             case LogicalTypeId.Tuple when type.TypeInfo is StructTypeInfo tuple:

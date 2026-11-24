@@ -56,7 +56,20 @@ public sealed class QuackTransport : IDisposable
     {
     }
 
-    public async Task<QuackMessage> SendAsync(QuackMessage message, CancellationToken cancellationToken = default)
+    public Task<QuackMessage> SendAsync(QuackMessage message, CancellationToken cancellationToken = default)
+        => SendCoreAsync(message, cancellationToken, markBrokenOnCancel: true);
+
+    // For a side request (CANCEL) that may be abandoned: it runs on its own
+    // pooled HTTP connection, so giving up on it leaves the transport intact.
+    internal async Task<TResponse> SendSideRequestAsync<TResponse>(QuackMessage message, CancellationToken cancellationToken)
+        where TResponse : QuackMessage
+    {
+        QuackMessage response = await SendCoreAsync(message, cancellationToken, markBrokenOnCancel: false).ConfigureAwait(false);
+        return response as TResponse ?? throw new QuackException(
+            $"Expected response of type '{typeof(TResponse).Name}' but server returned '{response.GetType().Name}' (MessageType={response.MessageType}).");
+    }
+
+    private async Task<QuackMessage> SendCoreAsync(QuackMessage message, CancellationToken cancellationToken, bool markBrokenOnCancel)
     {
         ArgumentNullException.ThrowIfNull(message);
         if (IsBroken)
@@ -78,7 +91,7 @@ public sealed class QuackTransport : IDisposable
         }
         catch (OperationCanceledException)
         {
-            MarkBroken();
+            if (markBrokenOnCancel) MarkBroken();
             throw;
         }
         catch (HttpRequestException ex)
@@ -96,7 +109,7 @@ public sealed class QuackTransport : IDisposable
             }
             catch (OperationCanceledException)
             {
-                MarkBroken();
+                if (markBrokenOnCancel) MarkBroken();
                 throw;
             }
 
@@ -108,7 +121,10 @@ public sealed class QuackTransport : IDisposable
                 {
                     throw ToTypedError(message.ConnectionId, errorResponse);
                 }
-                throw new QuackException($"HTTP {(int)response.StatusCode} ({response.StatusCode}) from quack server at {_endpoint}.");
+                throw new QuackException($"HTTP {(int)response.StatusCode} ({response.StatusCode}) from quack server at {_endpoint}.")
+                {
+                    HttpStatusCode = (int)response.StatusCode,
+                };
             }
 
             QuackMessage parsed;

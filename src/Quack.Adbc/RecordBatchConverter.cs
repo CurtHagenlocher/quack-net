@@ -61,7 +61,12 @@ internal static class RecordBatchConverter
         BinaryType => new LogicalType(LogicalTypeId.Blob),
         Time64Type t when t.Unit == TimeUnit.Microsecond => new LogicalType(LogicalTypeId.Time),
         Time64Type t when t.Unit == TimeUnit.Nanosecond => new LogicalType(LogicalTypeId.TimeNs),
-        TimestampType ts when ts.Timezone is not null => new LogicalType(LogicalTypeId.TimestampTz),
+        // DuckDB stores zoned timestamps in microseconds (TIMESTAMPTZ) or, since
+        // 2.0, nanoseconds (TIMESTAMPTZ_NS). Seconds and milliseconds are scaled
+        // to microseconds in ToColumn.
+        TimestampType ts when ts.Timezone is not null => ts.Unit == TimeUnit.Nanosecond
+            ? new LogicalType(LogicalTypeId.TimestampTzNs)
+            : new LogicalType(LogicalTypeId.TimestampTz),
         TimestampType ts => ts.Unit switch
         {
             TimeUnit.Second => new LogicalType(LogicalTypeId.TimestampSec),
@@ -145,6 +150,9 @@ internal static class RecordBatchConverter
             DoubleArray a => Fixed(a.Data, targetType, rowCount, sizeof(double), validity),
             Date32Array a => Fixed(a.Data, targetType, rowCount, sizeof(int), validity),
             Time64Array a => Fixed(a.Data, targetType, rowCount, sizeof(long), validity),
+            TimestampArray a when targetType.Id == LogicalTypeId.TimestampTz
+                                  && ((TimestampType)a.Data.DataType).Unit is TimeUnit.Second or TimeUnit.Millisecond
+                => ScaledTimestamps(a, targetType, rowCount, validity),
             TimestampArray a => Fixed(a.Data, targetType, rowCount, sizeof(long), validity),
             // Decimal128Array : FixedSizeBinaryArray, MapArray : ListArray —
             // the subclass arms must come before their base-class arms.
@@ -200,6 +208,28 @@ internal static class RecordBatchConverter
             Count = rowCount,
             ElementSize = elementSize,
             Data = values,
+            Validity = validity,
+        };
+    }
+
+    // Zoned Arrow timestamps in seconds or milliseconds, scaled to DuckDB's
+    // TIMESTAMPTZ microseconds.
+    private static FixedSizeColumn ScaledTimestamps(TimestampArray array, LogicalType type, int rowCount, ValidityMask validity)
+    {
+        long factor = ((TimestampType)array.Data.DataType).Unit == TimeUnit.Second ? 1_000_000L : 1_000L;
+        ReadOnlySpan<long> source = array.Values;
+        byte[] bytes = new byte[rowCount * sizeof(long)];
+        for (int i = 0; i < rowCount; i++)
+        {
+            long micros = validity.IsValid(i) ? checked(source[i] * factor) : 0;
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(bytes.AsSpan(i * sizeof(long)), micros);
+        }
+        return new FixedSizeColumn
+        {
+            Type = type,
+            Count = rowCount,
+            ElementSize = sizeof(long),
+            Data = bytes,
             Validity = validity,
         };
     }

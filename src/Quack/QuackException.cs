@@ -24,4 +24,8 @@ public class QuackException : Exception
 
     // The server's own database was invalidated by this error.
     public bool ServerMustInvalidate { get; init; }
+
+    // The HTTP status, when the server answered with a non-success status and
+    // no ErrorResponse.
+    public int? HttpStatusCode { get; init; }
 }

@@ -194,6 +194,46 @@ public class QuackV3MessageTests
     }
 
     [Fact]
+    public void NullStructRows_NullTheirChildren_AndCarryNoStringBytes()
+    {
+        // Row 1 is a NULL struct whose children are valid (legal in Arrow).
+        LogicalType st = new(LogicalTypeId.Struct, new StructTypeInfo { ChildTypes = [new("a", IntType), new("b", VarcharType)] });
+        DuckDbChunk chunk = ChunkBuilder.OneColumn(st, new StructColumn
+        {
+            Type = st,
+            Count = 3,
+            Validity = new ValidityMask(new byte[] { 0b101, 0, 0, 0, 0, 0, 0, 0 }),
+            Fields =
+            [
+                new FixedSizeColumn { Type = IntType, Count = 3, ElementSize = 4, Data = ChunkBuilder.Int32Bytes(1, 2, 3) },
+                new VarBytesColumn
+                {
+                    Type = VarcharType,
+                    Count = 3,
+                    Values = [(ReadOnlyMemory<byte>)"x"u8.ToArray(), (ReadOnlyMemory<byte>)"hidden"u8.ToArray(), (ReadOnlyMemory<byte>)"z"u8.ToArray()],
+                },
+            ],
+        });
+        ArrayBufferWriter<byte> buffer = new();
+        DataChunkWriter.Write(new BinarySerializer(buffer), chunk);
+        Assert.True(buffer.WrittenSpan.IndexOf("hidden"u8) < 0, "a NULL struct row's string reached the wire");
+
+        StructColumn round = Assert.IsType<StructColumn>(DataChunkReader.Read(new BinaryDeserializer(buffer.WrittenMemory)).Columns[0]);
+        Assert.True(round.Fields[0].IsNull(1));
+        Assert.True(round.Fields[1].IsNull(1));
+        Assert.Equal("z"u8.ToArray(), Assert.IsType<VarBytesColumn>(round.Fields[1]).Values[2]!.Value.ToArray());
+    }
+
+    [Fact]
+    public void UnnamedStruct_RendersAsTuple_MixedIsRefused()
+    {
+        LogicalType unnamed = new(LogicalTypeId.Struct, new StructTypeInfo { ChildTypes = [new("", IntType), new("", VarcharType)] });
+        Assert.Equal("TUPLE(INTEGER, VARCHAR)", LogicalTypeSql.ToSql(unnamed));
+        LogicalType mixed = new(LogicalTypeId.Struct, new StructTypeInfo { ChildTypes = [new("a", IntType), new("", VarcharType)] });
+        Assert.Throws<NotSupportedException>(() => LogicalTypeSql.ToSql(mixed));
+    }
+
+    [Fact]
     public void Varchar_LegacyListLayout_IsStillRead()
     {
         ArrayBufferWriter<byte> buffer = new();

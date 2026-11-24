@@ -57,13 +57,18 @@ internal static class QueryCancellation
         }
 
         // The token fired while the request runs. Ask the server to interrupt
-        // the query, and repeat until the request ends: a CANCEL that arrives
-        // before the server has registered the query is refused as naming a
-        // different query.
+        // the query, and repeat until the request ends, WITHOUT waiting for the
+        // previous CANCEL: one that arrives before the server has registered
+        // the query is refused, and one that arrives after registration but
+        // before the query starts executing can hang (quack 3bc63c0 interrupts
+        // the connection, the starting query clears the flag, and the CANCEL
+        // then joins a query that runs on). The next CANCEL interrupts the
+        // running query and releases both. Each CANCEL names this query, so a
+        // late one cannot hit a later query.
         DateTime deadline = DateTime.UtcNow + (grace ?? DefaultGrace);
         while (!send.IsCompleted && DateTime.UtcNow < deadline)
         {
-            await TrySendCancelAsync(transport, request.ConnectionId, queryUuid, deadline).ConfigureAwait(false);
+            _ = TrySendCancelAsync(transport, request.ConnectionId, queryUuid, deadline);
             await Task.WhenAny(send, Task.Delay(CancelRetryInterval)).ConfigureAwait(false);
         }
         if (!send.IsCompleted)
@@ -98,7 +103,7 @@ internal static class QueryCancellation
         using CancellationTokenSource timeout = new(left);
         try
         {
-            await transport.SendAsync<SuccessResponse>(
+            await transport.SendSideRequestAsync<SuccessResponse>(
                 new CancelRequestMessage { ConnectionId = connectionId, QueryUuid = queryUuid },
                 timeout.Token).ConfigureAwait(false);
         }
@@ -108,7 +113,7 @@ internal static class QueryCancellation
         }
         catch (OperationCanceledException)
         {
-            // The deadline passed while cancelling; the caller aborts.
+            // The deadline passed while cancelling; abandoned without breaking the transport.
         }
     }
 }
