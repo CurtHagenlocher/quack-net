@@ -67,6 +67,8 @@ internal static class VectorWriter
             case ArrayColumn arrayCol:
                 WriteArrayColumn(s, arrayCol, count);
                 break;
+            case VariantColumn:
+                throw new NotSupportedException("Sending VARIANT values to the server is not supported yet.");
             default:
                 throw new SerializationException(
                     $"VectorWriter does not support column kind '{column.GetType().Name}'.");

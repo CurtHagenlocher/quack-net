@@ -45,13 +45,36 @@ internal static class VectorReader
                 return ReadSequence(reader, type, count);
             case VectorType.Dictionary:
                 return ReadDictionary(reader, type, count);
-            case VectorType.Fsst:
             case VectorType.Shredded:
+                return ReadShredded(reader, type, count);
+            case VectorType.Fsst:
                 throw new SerializationException(
                     $"VectorType.{vectorType} is not yet supported by the MVP client.");
             default:
                 throw new SerializationException($"Unknown VectorType value {(int)vectorType}.");
         }
+    }
+
+    // Shredded VARIANT vector (ShreddedVectorBuffer::TrySerialize):
+    //   field 91  shredded_type  -- LogicalType STRUCT(unshredded, shredded)
+    //   field 92  shredded_data  -- object: a vector of that type
+    private static DuckDbColumn ReadShredded(BinaryDeserializer reader, LogicalType type, int count)
+    {
+        if (type.Id != LogicalTypeId.Variant)
+        {
+            throw new SerializationException($"A shredded vector must be a VARIANT, found '{type}'.");
+        }
+        reader.BeginProperty(fieldId: 91);
+        LogicalType shreddedType = LogicalType.Deserialize(reader);
+        reader.BeginProperty(fieldId: 92);
+        reader.BeginObject();
+        DuckDbColumn data = Read(reader, shreddedType, count);
+        reader.EndObject();
+        if (data is not StructColumn shredded)
+        {
+            throw new SerializationException("Shredded VARIANT data must be a STRUCT.");
+        }
+        return VariantDecoder.FromShredded(shredded, type);
     }
 
     // Dictionary vector wire layout (Vector::Serialize, DICTIONARY_VECTOR branch):
@@ -134,8 +157,11 @@ internal static class VectorReader
                 };
             }
             default:
-                throw new SerializationException(
-                    $"Dictionary expansion is not yet supported for column kind '{dictionary.GetType().Name}'.");
+            {
+                int[] rows = new int[count];
+                for (int i = 0; i < count; i++) rows[i] = (int)sel[i];
+                return ColumnGather.Take(dictionary, rows);
+            }
         }
     }
 
@@ -217,6 +243,8 @@ internal static class VectorReader
         {
             case PhysicalType.Varchar:
                 return ReadVarcharColumn(reader, type, count, validity);
+            case PhysicalType.Struct when type.Id == LogicalTypeId.Variant:
+                return VariantDecoder.FromUnshredded(ReadStructColumn(reader, type, count, validity), type);
             case PhysicalType.Struct:
                 return ReadStructColumn(reader, type, count, validity);
             case PhysicalType.List:
@@ -471,8 +499,8 @@ internal static class VectorReader
                 : BroadcastValidity(bytesCol.Validity, count);
             return new VarBytesColumn { Type = singleton.Type, Count = count, Validity = expandedValidity, Values = expanded };
         }
-        throw new SerializationException(
-            $"ConstantVector broadcast not supported for column kind '{singleton.GetType().Name}'.");
+        // Nested kinds (STRUCT, LIST, ARRAY, VARIANT): repeat row 0.
+        return ColumnGather.Take(singleton, new int[count]);
     }
 
     private static ValidityMask BroadcastValidity(ValidityMask source, int count)

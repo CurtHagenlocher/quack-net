@@ -67,6 +67,8 @@ public sealed class LogicalType : IEquatable<LogicalType>
             case LogicalTypeId.Struct:
             case LogicalTypeId.Tuple:
             case LogicalTypeId.Union:
+            // VARIANT is a STRUCT(keys, children, values, data) underneath.
+            case LogicalTypeId.Variant:
                 return PhysicalType.Struct;
             case LogicalTypeId.Array:
                 return PhysicalType.Array;

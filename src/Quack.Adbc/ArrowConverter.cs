@@ -128,6 +128,9 @@ internal static class ArrowConverter
 
         LogicalTypeId.SqlNull => NullType.Default,
 
+        // arrow.parquet.variant, as DuckDB's own Arrow export (see VariantArrowConverter).
+        LogicalTypeId.Variant => VariantType.Default,
+
         _ => throw new NotSupportedException(
             $"Arrow conversion for DuckDB type '{logical.Id}' is not implemented yet."),
     };
@@ -228,6 +231,8 @@ internal static class ArrowConverter
             LogicalTypeId.Array => BuildFixedSizeListArray((ArrayColumn)column, validity, nullCount, rowCount),
 
             LogicalTypeId.SqlNull => new NullArray(rowCount),
+
+            LogicalTypeId.Variant => VariantArrowConverter.Build((VariantColumn)column, rowCount),
 
             _ => throw new NotSupportedException(
                 $"Arrow array build for '{id}' on column kind '{column.GetType().Name}' is not implemented yet."),

@@ -61,6 +61,24 @@ The integration tests start the DuckDB CLI named by `QUACK_TEST_DUCKDB`
 - **Errors** carry the server's exception type
   (`QuackException.ServerExceptionType`, e.g. `Catalog`).
 
+### VARIANT
+
+VARIANT columns arrive as `VariantColumn` with one `DuckDbVariant` per row
+(null = SQL NULL; `DuckDbVariantType.Null` = a variant null). Every DuckDB
+variant type is decoded losslessly, from both forms DuckDB 2.0 sends: the
+canonical layout and SHREDDED vectors (typed columns plus an untyped
+overlay; DuckDB sends them for a column cast to VARIANT and for VARIANT
+columns a checkpoint shredded). Object fields keep the variant's order; for a
+shredded value that is the typed fields first, then the leftover ones.
+
+Through ADBC a VARIANT column is `arrow.parquet.variant` (Apache.Arrow's
+`VariantArray`), with the type mapping of DuckDB's own Arrow export:
+unsigned and 128-bit integers widen to the next signed type (UINT32 and
+wider to INT64 when the value fits), and INTERVAL, BIGNUM, BITSTRING,
+TIMESTAMP_S / _MS, TIME_TZ, TIME_NS, TIMESTAMP_NS WITH TIME ZONE and GEOMETRY
+values are refused, as DuckDB refuses them. Sending VARIANT values to the
+server (append / ingest) is not supported yet.
+
 ## Using `Quack` from .NET
 
 ```csharp
