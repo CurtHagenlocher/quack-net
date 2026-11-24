@@ -63,12 +63,12 @@ internal static class QueryCancellation
         // before the query starts executing can hang (quack 3bc63c0 interrupts
         // the connection, the starting query clears the flag, and the CANCEL
         // then joins a query that runs on). The next CANCEL interrupts the
-        // running query and releases both. Each CANCEL names this query, so a
-        // late one cannot hit a later query.
+        // running query and releases both.
         DateTime deadline = DateTime.UtcNow + (grace ?? DefaultGrace);
+        List<Task> cancels = [];
         while (!send.IsCompleted && DateTime.UtcNow < deadline)
         {
-            _ = TrySendCancelAsync(transport, request.ConnectionId, queryUuid, deadline);
+            cancels.Add(TrySendCancelAsync(transport, request.ConnectionId, queryUuid, deadline));
             await Task.WhenAny(send, Task.Delay(CancelRetryInterval)).ConfigureAwait(false);
         }
         if (!send.IsCompleted)
@@ -84,6 +84,11 @@ internal static class QueryCancellation
         {
             // The interrupt error (or the local abort) is the expected outcome.
         }
+        // Return only once every CANCEL is answered: although each names this
+        // query, one the server handles after the query has ended interrupts
+        // the session, and so the caller's next query (measured on Linux:
+        // "Interrupted!" on the next statement). Each is bounded by the deadline.
+        await Task.WhenAll(cancels).ConfigureAwait(false);
         // Even a request that still succeeded is answered by cancellation: the
         // CANCEL has closed the query's result on the server.
         throw new OperationCanceledException(cancellationToken);
