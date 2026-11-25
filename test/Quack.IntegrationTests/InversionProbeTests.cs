@@ -102,14 +102,36 @@ public class InversionProbeTests : IClassFixture<QuackServerFixture>
     {
         QuackConnectionOptions options = new() { HeartbeatTimeoutSeconds = 2 };
         await using QuackConnection conn = await QuackConnection.OpenAsync(QuackUri.Parse(_server.QuackUri), _server.Token, options: options);
-        Stopwatch sw = Stopwatch.StartNew();
-        IReadOnlyList<DuckDbChunk> back = await (await conn.ExecuteAsync(
-            "SELECT count(*)::BIGINT FROM range(700000000) a(x) WHERE hash(x) % 7 = 3")).ToListAsync();
-        _out.WriteLine($"long query: {sw.Elapsed.TotalSeconds:0.0} s, result {Int64(back[0], 0, 0)}");
-        Assert.True(sw.Elapsed > TimeSpan.FromSeconds(4), "the query must outlast the 2 s lease several times");
+        long size = await RowsForSecondsAsync(8);
+        for (int attempt = 1; ; attempt++, size *= 2)
+        {
+            Stopwatch sw = Stopwatch.StartNew();
+            IReadOnlyList<DuckDbChunk> back = await (await conn.ExecuteAsync(LongWork(size))).ToListAsync();
+            _out.WriteLine($"long query: {size} rows, {sw.Elapsed.TotalSeconds:0.0} s, result {Int64(back[0], 0, 0)}");
+            if (sw.Elapsed > TimeSpan.FromSeconds(4))
+            {
+                break;
+            }
+            Assert.True(attempt < 3, "the query must outlast the 2 s lease several times");
+        }
 
         IReadOnlyList<DuckDbChunk> next = await All(conn, "SELECT 11::BIGINT");
         Assert.Equal(11, Int64(next[0], 0, 0));
+    }
+
+    private static string LongWork(long rows)
+        => $"SELECT count(*)::BIGINT FROM range({rows}) a(x) WHERE hash(x) % 7 = 3";
+
+    // The LongWork size that runs about this long here: a fixed size took
+    // 7.6 s on one machine and 3.3 s on a CI runner, so 70 million rows are
+    // timed first and scaled. Other tests running beside it skew the
+    // estimate, so the callers double the size while a run comes out short.
+    private async Task<long> RowsForSecondsAsync(double seconds)
+    {
+        await using QuackConnection conn = await QuackConnection.OpenAsync(QuackUri.Parse(_server.QuackUri), _server.Token);
+        Stopwatch sw = Stopwatch.StartNew();
+        await All(conn, LongWork(70_000_000));
+        return (long)Math.Min(70_000_000 * seconds / Math.Max(sw.Elapsed.TotalSeconds, 0.01), 20_000_000_000);
     }
 
     // C control: the same sequence on a session that never heartbeats.
@@ -124,16 +146,25 @@ public class InversionProbeTests : IClassFixture<QuackServerFixture>
             MaxSupportedQuackVersion = QuackConnection.ProtocolVersion,
             HeartbeatTimeoutSeconds = 2,
         });
-        Stopwatch sw = Stopwatch.StartNew();
-        PrepareResponseMessage first = await transport.SendAsync<PrepareResponseMessage>(new PrepareRequestMessage
+        long size = await RowsForSecondsAsync(8);
+        for (int attempt = 1; ; attempt++, size *= 2)
         {
-            ConnectionId = session.ConnectionId,
-            SqlQuery = "SELECT count(*)::BIGINT FROM range(700000000) a(x) WHERE hash(x) % 7 = 3",
-            QueryUuid = 99,
-        });
-        _out.WriteLine($"long PREPARE without heartbeats returned after {sw.Elapsed.TotalSeconds:0.0} s");
+            Stopwatch sw = Stopwatch.StartNew();
+            await transport.SendAsync<PrepareResponseMessage>(new PrepareRequestMessage
+            {
+                ConnectionId = session.ConnectionId,
+                SqlQuery = LongWork(size),
+                QueryUuid = 98 + attempt,
+            });
+            _out.WriteLine($"long PREPARE without heartbeats returned after {sw.Elapsed.TotalSeconds:0.0} s");
+            if (sw.Elapsed > TimeSpan.FromSeconds(4))
+            {
+                break;
+            }
+            Assert.True(attempt < 3, "the PREPARE must outlast the 2 s lease");
+        }
         QuackSessionExpiredException ex = await Assert.ThrowsAsync<QuackSessionExpiredException>(() => transport.SendAsync<PrepareResponseMessage>(
-            new PrepareRequestMessage { ConnectionId = session.ConnectionId, SqlQuery = "SELECT 1", QueryUuid = 100 }));
+            new PrepareRequestMessage { ConnectionId = session.ConnectionId, SqlQuery = "SELECT 1", QueryUuid = 200 }));
         _out.WriteLine("next request: " + ex.ServerMessage);
     }
 
