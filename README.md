@@ -281,9 +281,10 @@ the producer's own extensions (date functions, `IGNORE NULLS` windows) are read.
 Scans with filters and projections, joins (inner, outer, semi, anti, mark,
 single), aggregates with grouping sets and `FILTER`, window functions, set
 operations, sorts and limits, subqueries; and writes: `INSERT … SELECT`,
-`DELETE` (joins allowed) and `UPDATE` of one table, answering the affected-row
-count (`ExecuteUpdate`). Not: `RETURNING`, `MERGE`, table functions, or a
-function of the client's own catalog. What a division by zero or a float outside
+`DELETE` (joins allowed), `UPDATE` of one table and the producer's `MERGE`
+(matched by the target's key), answering the affected-row count
+(`ExecuteUpdate`). Not: `RETURNING`, table functions, or a function of the
+client's own catalog. What a division by zero or a float outside
 its domain returns follows the plan's function options, checked against the
 server's settings (`ieee_floating_point_ops`, `error_on_division_by_zero`); the
 other settings the SQL depends on (`TimeZone`, `default_collation`, …) are the
