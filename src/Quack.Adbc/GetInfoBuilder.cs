@@ -149,7 +149,7 @@ internal static class GetInfoBuilder
             [AdbcInfoCode.VendorVersion] = connection.Underlying.ServerDuckDbVersion,
             [AdbcInfoCode.VendorArrowVersion] = "v" + AssemblyVersion(arrowAsm),
             [AdbcInfoCode.VendorSql] = true,
-            [AdbcInfoCode.VendorSubstrait] = false,
+            [AdbcInfoCode.VendorSubstrait] = true,
             [AdbcInfoCode.DriverName] = "quack-net ADBC",
             [AdbcInfoCode.DriverVersion] = AssemblyVersion(driverAsm),
             [AdbcInfoCode.DriverArrowVersion] = "v" + AssemblyVersion(arrowAsm),

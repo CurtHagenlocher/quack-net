@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using Apache.Arrow;
 using Apache.Arrow.Adbc;
 using Apache.Arrow.Ipc;
+using Quack.Adbc.Substrait;
 using Quack.Data;
 using Quack.Types;
 using IngestMode = Quack.QuackConnection.IngestMode;
@@ -33,6 +34,9 @@ internal sealed class QuackAdbcStatement : AdbcStatement
     private TimeSpan? _commandTimeoutOverride;
     private bool _commandTimeoutOverrideSet;
     private bool _disposed;
+    // A Substrait plan instead of SQL (SubstraitPlan), and its translation once made.
+    private byte[]? _substraitPlan;
+    private string? _planSql;
 
     public QuackAdbcStatement(QuackAdbcConnection connection)
     {
@@ -68,11 +72,74 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         set
         {
             base.SqlQuery = value;
+            _substraitPlan = null;
+            _planSql = null;
             _ingestTable = null;
             _ingestCatalog = null;
             _ingestSchema = null;
             _ingestTemporary = false;
             _ingestMode = IngestMode.Create;
+        }
+    }
+
+    // A Substrait plan, run as the DuckDB query it translates to (Substrait/DuckDbSubstrait.cs). It replaces the SQL
+    // text, and SQL text replaces it; like SQL text, it ends ingest mode.
+    public override byte[]? SubstraitPlan
+    {
+        get => _substraitPlan;
+        set
+        {
+            SqlQuery = null;
+            _substraitPlan = value;
+        }
+    }
+
+    // ADBC Prepare: for a Substrait plan, the translation, so a plan that cannot be translated exactly is refused
+    // here (NotImplemented), before anything runs. SQL text is not prepared (quack has no parameters).
+    public override void Prepare()
+    {
+        ThrowIfDisposed();
+        if (_substraitPlan is null)
+        {
+            base.Prepare();
+            return;
+        }
+        _planSql = TranslatePlan(_substraitPlan);
+    }
+
+    // The query text: the SQL, or the plan's translation.
+    private string? QueryText => _substraitPlan is null ? SqlQuery : _planSql ??= TranslatePlan(_substraitPlan);
+
+    private string TranslatePlan(byte[] plan)
+    {
+        DuckDbSettings settings;
+        using (QuackOperation operation = BeginOperation())
+        {
+            try
+            {
+                QuackQueryResult result = _connection.Underlying
+                    .ExecuteAsync(DuckDbSettings.Query, operation.Token)
+                    .GetAwaiter()
+                    .GetResult();
+                using var stream = new QuackArrowArrayStream(result);
+                settings = DuckDbSettings.Read(stream);
+            }
+            catch (OperationCanceledException) when (operation.Token.IsCancellationRequested)
+            {
+                throw operation.Translate("Prepare");
+            }
+            catch (QuackException e)
+            {
+                throw QuackAdbcException.From(e);
+            }
+        }
+        try
+        {
+            return DuckDbSubstrait.ToSql(plan, settings);
+        }
+        catch (SubstraitTranslationException e)
+        {
+            throw new AdbcException(e.Message, AdbcStatusCode.NotImplemented);
         }
     }
 
@@ -128,9 +195,10 @@ internal sealed class QuackAdbcStatement : AdbcStatement
             throw new InvalidOperationException(
                 "ExecuteQuery cannot be used to ingest; use ExecuteUpdate with the bound data.");
         }
-        if (string.IsNullOrEmpty(SqlQuery))
+        string? query = QueryText;
+        if (string.IsNullOrEmpty(query))
         {
-            throw new InvalidOperationException("SqlQuery must be set before calling ExecuteQuery.");
+            throw new InvalidOperationException("SqlQuery or SubstraitPlan must be set before calling ExecuteQuery.");
         }
 
         // The operation lives on in the result stream, so a cancel also stops
@@ -140,7 +208,7 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         try
         {
             result = _connection.Underlying
-                .ExecuteAsync(SqlQuery, operation.Token)
+                .ExecuteAsync(query, operation.Token)
                 .GetAwaiter()
                 .GetResult();
         }
@@ -184,11 +252,12 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         {
             throw new InvalidOperationException("ExecuteSchema does not apply to an ingest.");
         }
-        if (string.IsNullOrEmpty(SqlQuery))
+        string? text = QueryText;
+        if (string.IsNullOrEmpty(text))
         {
-            throw new InvalidOperationException("SqlQuery must be set before calling ExecuteSchema.");
+            throw new InvalidOperationException("SqlQuery or SubstraitPlan must be set before calling ExecuteSchema.");
         }
-        string query = SqlQuery.TrimEnd();
+        string query = text.TrimEnd();
         while (query.EndsWith(';'))
         {
             query = query[..^1].TrimEnd();
@@ -261,9 +330,10 @@ internal sealed class QuackAdbcStatement : AdbcStatement
             throw new AdbcException("Bulk ingest needs bound data (Bind or BindStream).", AdbcStatusCode.InvalidState);
         }
 
-        if (string.IsNullOrEmpty(SqlQuery))
+        string? update = QueryText;
+        if (string.IsNullOrEmpty(update))
         {
-            throw new InvalidOperationException("SqlQuery must be set before calling ExecuteUpdate.");
+            throw new InvalidOperationException("SqlQuery or SubstraitPlan must be set before calling ExecuteUpdate.");
         }
 
         // SQL-only path: execute and drain. quack doesn't return an affected-
@@ -272,7 +342,7 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         try
         {
             QuackQueryResult result = _connection.Underlying
-                .ExecuteAsync(SqlQuery, operation.Token)
+                .ExecuteAsync(update, operation.Token)
                 .GetAwaiter()
                 .GetResult();
             IReadOnlyList<DuckDbChunk> chunks = result.ToListAsync(operation.Token).GetAwaiter().GetResult();

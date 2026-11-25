@@ -102,7 +102,7 @@ public class MetadataTests : IClassFixture<QuackServerFixture>
         Assert.Equal("DuckDB", got[AdbcInfoCode.VendorName]);
         Assert.False(string.IsNullOrEmpty((string?)got[AdbcInfoCode.VendorVersion]));
         Assert.Equal(true, got[AdbcInfoCode.VendorSql]);
-        Assert.Equal(false, got[AdbcInfoCode.VendorSubstrait]);
+        Assert.Equal(true, got[AdbcInfoCode.VendorSubstrait]);
         Assert.Equal("quack-net ADBC", got[AdbcInfoCode.DriverName]);
         Assert.False(string.IsNullOrEmpty((string?)got[AdbcInfoCode.DriverArrowVersion]));
 

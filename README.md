@@ -266,6 +266,28 @@ driver manager):
 The library also exports `AdbcDriverInit`, the entry point a driver manager
 uses when none is given.
 
+### Substrait plans
+
+A statement takes a [Substrait](https://substrait.io) plan instead of SQL
+(`SubstraitPlan`, `vendor_substrait` = true): the driver writes it as one
+DuckDB query (`src/Quack.Adbc/Substrait/`), and `Prepare` refuses a plan it
+cannot write with DuckDB's exact meaning (`ADBC_STATUS_NOT_IMPLEMENTED`), before
+anything runs; `ExecuteQuery` / `ExecuteSchema` then run it. It is built for
+plans DuckDB itself produces (`to_substrait`; here the producer of the
+[fabricator](https://github.com/cmettler/fabricator-extension) extension, whose
+remote pushdown hands a DuckDB client's queries to a quack server this way): a
+function with no extension URN is taken as a DuckDB function of that name, and
+the producer's own extensions (date functions, `IGNORE NULLS` windows) are read.
+Scans with filters and projections, joins (inner, outer, semi, anti, mark,
+single), aggregates with grouping sets and `FILTER`, window functions, set
+operations, sorts and limits, subqueries; not writes, table functions, or a
+function of the client's own catalog. What a division by zero or a float outside
+its domain returns follows the plan's function options, checked against the
+server's settings (`ieee_floating_point_ops`, `error_on_division_by_zero`); the
+other settings the SQL depends on (`TimeZone`, `default_collation`, …) are the
+client's to compare. The plan decoder derives from the Kusto ADBC driver (MIT,
+see `src/Quack.Adbc/Substrait/THIRD-PARTY-NOTICES.md`).
+
 Not implemented: partitioned results, prepared statements with parameters,
 isolation levels and read-only connections, and error details.
 
