@@ -83,6 +83,8 @@ internal sealed class DuckDbEmitter
     private readonly DuckDbSettings _settings;
     private readonly bool _singleJoinAnyRow;
     private readonly Stack<IReadOnlyList<string>> _outer = new();
+    // every named table read so far, as its FROM item ("<table> AS tN"): a DELETE / UPDATE finds its target's here
+    private readonly List<(string Table, string Alias)> _reads = new();
     private int _alias;
 
     public DuckDbEmitter(DuckDbSettings settings, bool singleJoinAnyRow)
@@ -192,8 +194,8 @@ internal sealed class DuckDbEmitter
 
     public string EmitRoot(RootRel root)
     {
-        if (root.Input is WriteRel)
-            throw SubstraitTranslationException.Unsupported("writes are not supported by the DuckDB dialect");
+        if (root.Input is WriteRel write)
+            return EmitWrite(write);
         var block = EmitRel(root.Input);
         if (block.Columns.Count == 0)
             throw SubstraitTranslationException.Unsupported("The plan's result has no columns.");
@@ -201,6 +203,69 @@ internal sealed class DuckDbEmitter
             throw SubstraitTranslationException.MalformedPlan($"RelRoot has {names.Count} names but its input has {block.Columns.Count} columns.");
         var cols = Enumerable.Range(0, block.Columns.Count).Select(i => "c" + i.ToString(CultureInfo.InvariantCulture)).ToList();
         return Render(block, cols, withOrder: true);
+    }
+
+    // ── writes ────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A WriteRel, as the fabricator producer writes them: INSERT with the query that gives the rows (in the order of
+    /// the written columns); DELETE with the query over the target that selects its rows; UPDATE with the query over
+    /// the target that gives the new values, in the order of the assigned columns. The statement answers DuckDB's
+    /// affected-row count. Refused: RETURNING, MERGE (an enhancement), rows moved by a DELETE inside an INSERT, a
+    /// DELETE whose target is not read exactly once at the top of its query, an UPDATE joined with another table.
+    /// </summary>
+    private string EmitWrite(WriteRel write)
+    {
+        if (write.Output == F.WriteOutput_ModifiedRecords || write.Emit != null)
+            throw SubstraitTranslationException.Unsupported("a write returning its rows (RETURNING)");
+        if (write.Enhancement != null)
+            throw SubstraitTranslationException.Unsupported($"a write with the enhancement {write.Enhancement} (MERGE)");
+        if (write.Input is WriteRel)
+            throw SubstraitTranslationException.Unsupported("rows moved by a DELETE inside an INSERT");
+        if (write.TableNames.Count == 0)
+            throw SubstraitTranslationException.MalformedPlan("A WriteRel names no table.");
+        string target = string.Join(".", write.TableNames.Select(Quote));
+        switch (write.Op)
+        {
+            case F.WriteOp_Insert:
+            {
+                if (write.ColumnNames.Count == 0 || write.ColumnNames.Distinct(StringComparer.OrdinalIgnoreCase).Count() != write.ColumnNames.Count)
+                    throw SubstraitTranslationException.MalformedPlan("A WriteRel INSERT needs its columns, each once.");
+                var block = EmitRel(write.Input);
+                if (block.Columns.Count != write.ColumnNames.Count)
+                    throw SubstraitTranslationException.MalformedPlan($"A WriteRel writes {write.ColumnNames.Count} columns from {block.Columns.Count}.");
+                return "INSERT INTO " + target + " (" + string.Join(", ", write.ColumnNames.Select(Quote)) + ") " + Select(block);
+            }
+            case F.WriteOp_Delete or F.WriteOp_Update:
+            {
+                var block = EmitRel(write.Input);
+                if (!block.IsPlain || block.From == null)
+                    throw SubstraitTranslationException.Unsupported("a DELETE / UPDATE over a grouped, windowed or limited query");
+                var reads = _reads.Where(r => r.Table == target).ToList();
+                if (reads.Count != 1)
+                    throw SubstraitTranslationException.Unsupported("a DELETE / UPDATE whose target is read more than once");
+                string read = target + " AS " + reads[0].Alias;
+                bool atTop = block.From == read || block.From.StartsWith(read + " ", StringComparison.Ordinal)
+                    || block.From.Contains(" JOIN " + read + " ", StringComparison.Ordinal)
+                    || block.From.EndsWith(" JOIN " + read, StringComparison.Ordinal);
+                if (!atTop)
+                    throw SubstraitTranslationException.Unsupported("a DELETE / UPDATE whose target is not read at the top of its query");
+                string where = block.Where.Count > 0 ? " WHERE " + string.Join(" AND ", block.Where.Select(w => "(" + w + ")")) : "";
+                if (write.Op == F.WriteOp_Delete)
+                {
+                    // the rows the query selects, by the target's row id (a join may select a row more than once)
+                    return "DELETE FROM " + target + " WHERE rowid IN (SELECT " + reads[0].Alias + ".rowid FROM " + block.From + where + ")";
+                }
+                if (block.From != read)
+                    throw SubstraitTranslationException.Unsupported("an UPDATE joined with another table");
+                if (write.ColumnNames.Count == 0 || block.Columns.Count != write.ColumnNames.Count)
+                    throw SubstraitTranslationException.MalformedPlan($"A WriteRel UPDATE assigns {write.ColumnNames.Count} columns from {block.Columns.Count}.");
+                var assignments = write.ColumnNames.Select((c, i) => Quote(c) + " = " + block.Columns[i]);
+                return "UPDATE " + read + " SET " + string.Join(", ", assignments) + where;
+            }
+            default:
+                throw SubstraitTranslationException.Unsupported($"WriteRel operation {write.Op}");
+        }
     }
 
     // ── relations ─────────────────────────────────────────────────────────────────────────────────────────
@@ -271,8 +336,10 @@ internal sealed class DuckDbEmitter
         {
             if (rel.TableNames.Count == 0)
                 throw SubstraitTranslationException.MalformedPlan("A read names no table.");
-            block.From = string.Join(".", rel.TableNames.Select(Quote)) + " AS " + alias;
+            string table = string.Join(".", rel.TableNames.Select(Quote));
+            block.From = table + " AS " + alias;
             block.Columns = rel.ColumnNames.Select(c => alias + "." + Quote(c)).ToList();
+            _reads.Add((table, alias));
         }
         // the filters apply to the base schema, before the projection
         if (rel.Filter != null)

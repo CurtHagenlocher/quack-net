@@ -57,6 +57,25 @@ public class SubstraitTests : IClassFixture<QuackServerFixture>
         "CAkQAToMCgRtYWluCgRlZF90GgMSAQAiGAoWCAEqBGICEAE6DBoKEggKBBICCAEiACoIEgYKAhIAIgASAmMwEgJjMTIKEGYqBkR1" +
         "Y2tEQkI2CAESMmV4dGVuc2lvbjppby5zdWJzdHJhaXQ6ZnVuY3Rpb25zX2FnZ3JlZ2F0ZV9nZW5lcmlj";
 
+    // DELETE FROM ed_t WHERE i > 5
+    private static readonly string DeletePlan =
+        "EhIaEBABGgpndDphbnlfYW55IAEaowISoAIKnQKaAZkCCgwKBG1haW4KBGVkX3QaACACKoICOv8BCgUSAwoBARLvARLsARLJAQrG" +
+        "ARKrAQoCaWQKAWkKAWoKAWIKAnRpCgJzaQoBZAoCZDEKAWYKAXMKAXYKAWMKBGZsYWcKAmR0CgJ0cwoBZxJwCgQqAhABCgQqAhAB" +
+        "CgQqAhABCgQ6AhABCgQaAhABCgQaAhABCgnCAQYIAhAKIAEKCcIBBggBEAEgAQoEWgIQAQoEYgIQAQoEYgIQAQoEYgIQAQoECgIQ" +
+        "AQoFggECEAEKB4oCBAgGGAEKBCoCEAEYAiIICgQKAggBEAE6DAoEbWFpbgoEZWRfdBoeGhwIARoECgIQASIKGggSBgoCEgAiACIG" +
+        "GgQKAigFGgQKAigBMAEyChBmKgZEdWNrREJCLwgBEitleHRlbnNpb246aW8uc3Vic3RyYWl0OmZ1bmN0aW9uc19jb21wYXJpc29u";
+
+    // UPDATE ed_t SET s = upper(s), i = i * 2 WHERE g = 1
+    private static readonly string UpdatePlan =
+        "EhUaExABGg1lcXVhbDphbnlfYW55IAESERoPEAIaCXVwcGVyOnN0ciACEhgaFhADGhBtdWx0aXBseTppMzJfaTMyIAMa6AIS5QIK" +
+        "4gKaAd4CCgwKBG1haW4KBGVkX3QaBgoBcwoBaSADKsECOr4CCgYSBAoCAwQS9wES9AES0QEKzgESqwEKAmlkCgFpCgFqCgFiCgJ0" +
+        "aQoCc2kKAWQKAmQxCgFmCgFzCgF2CgFjCgRmbGFnCgJkdAoCdHMKAWcScAoEKgIQAQoEKgIQAQoEKgIQAQoEOgIQAQoEGgIQAQoE" +
+        "GgIQAQoJwgEGCAIQCiABCgnCAQYIARABIAEKBFoCEAEKBGICEAEKBGICEAEKBGICEAEKBAoCEAEKBYIBAhABCgeKAgQIBhgBCgQq" +
+        "AhABGAIiEAoMCgIIDwoCCAkKAggBEAE6DAoEbWFpbgoEZWRfdBoeGhwIARoECgIQASIKGggSBgoCEgAiACIGGgQKAigBGhgaFggC" +
+        "GgRiAhABIgwaChIICgQSAggBIgAaIBoeCAMaBCoCEAEiDBoKEggKBBICCAIiACIGGgQKAigCMAEyChBmKgZEdWNrREJCLwgBEitl" +
+        "eHRlbnNpb246aW8uc3Vic3RyYWl0OmZ1bmN0aW9uc19jb21wYXJpc29uQisIAhInZXh0ZW5zaW9uOmlvLnN1YnN0cmFpdDpmdW5j" +
+        "dGlvbnNfc3RyaW5nQi8IAxIrZXh0ZW5zaW9uOmlvLnN1YnN0cmFpdDpmdW5jdGlvbnNfYXJpdGhtZXRpYw==";
+
     private readonly QuackServerFixture _server;
 
     public SubstraitTests(QuackServerFixture server) => _server = server;
@@ -79,6 +98,22 @@ public class SubstraitTests : IClassFixture<QuackServerFixture>
         Assert.Equal(
             await Rows(conn, sql: "SELECT t.id, u.s FROM ed_t t JOIN ed_u u ON t.i = u.i WHERE t.id < 5"),
             await Rows(conn, plan: JoinPlan));
+    }
+
+    [Theory]
+    [InlineData("delete", "DELETE FROM ed_t WHERE i > 5")]
+    [InlineData("update", "UPDATE ed_t SET s = upper(s), i = i * 2 WHERE g = 1")]
+    public async Task Write_ChangesWhatTheSqlChanges(string plan, string sql)
+    {
+        using AdbcConnection conn = Open();
+        Execute(conn, Tables);
+        long viaSql = Update(conn, sql: sql);
+        List<string> expected = await Rows(conn, sql: "SELECT id, i, g, s FROM ed_t");
+        Execute(conn, Tables);
+        long viaPlan = Update(conn, plan: plan == "delete" ? DeletePlan : UpdatePlan);
+        Assert.Equal(2, viaPlan);
+        Assert.Equal(viaSql, viaPlan);
+        Assert.Equal(expected, await Rows(conn, sql: "SELECT id, i, g, s FROM ed_t"));
     }
 
     [Fact]
@@ -133,6 +168,21 @@ public class SubstraitTests : IClassFixture<QuackServerFixture>
         using AdbcStatement stmt = conn.CreateStatement();
         stmt.SqlQuery = sql;
         stmt.ExecuteUpdate();
+    }
+
+    private static long Update(AdbcConnection conn, string? sql = null, string? plan = null)
+    {
+        using AdbcStatement stmt = conn.CreateStatement();
+        if (plan is not null)
+        {
+            stmt.SubstraitPlan = Convert.FromBase64String(plan);
+            stmt.Prepare();
+        }
+        else
+        {
+            stmt.SqlQuery = sql;
+        }
+        return stmt.ExecuteUpdate().AffectedRows;
     }
 
     // The rows as text, sorted (neither query orders them).
