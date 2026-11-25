@@ -89,6 +89,11 @@ internal sealed class QuackAdbcStatement : AdbcStatement
         get => _substraitPlan;
         set
         {
+            // the same plan again keeps its translation (a client sets the plan it prepared before executing it)
+            if (value is not null && _substraitPlan is not null && value.AsSpan().SequenceEqual(_substraitPlan))
+            {
+                return;
+            }
             SqlQuery = null;
             _substraitPlan = value;
         }

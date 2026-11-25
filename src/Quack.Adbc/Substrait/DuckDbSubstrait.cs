@@ -22,10 +22,11 @@ namespace Quack.Adbc.Substrait;
 /// </summary>
 internal sealed class DuckDbSettings
 {
-    /// <summary>The query that reads them as (name, value) rows.</summary>
+    /// <summary>The query that reads them as (name, value) rows (current_setting: duckdb_settings() scans every
+    /// setting, several times slower, and this runs before every translation).</summary>
     public const string Query =
-        "SELECT name, CAST(value AS VARCHAR) AS value FROM duckdb_settings() "
-        + "WHERE name IN ('ieee_floating_point_ops', 'error_on_division_by_zero')";
+        "SELECT 'ieee_floating_point_ops' AS name, CAST(current_setting('ieee_floating_point_ops') AS VARCHAR) AS value "
+        + "UNION ALL SELECT 'error_on_division_by_zero', CAST(current_setting('error_on_division_by_zero') AS VARCHAR)";
 
     public DuckDbSettings(bool ieeeFloatingPointOps, bool errorOnDivisionByZero)
     {
