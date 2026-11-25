@@ -400,7 +400,12 @@ internal sealed class DuckDbEmitter
                 throw SubstraitTranslationException.MalformedPlan("A read names no table.");
             string table = string.Join(".", rel.TableNames.Select(Quote));
             block.From = table + " AS " + alias;
-            block.Columns = rel.ColumnNames.Select(c => alias + "." + Quote(c)).ToList();
+            // a column the plan declares a string is read as VARCHAR: the client sees an ENUM as VARCHAR (Arrow has no
+            // enum), so its order, min / max and comparisons must be the string's, not the ENUM's declared order (for a
+            // VARCHAR column DuckDB drops the cast)
+            block.Columns = rel.ColumnNames.Select((c, i) => i < rel.ColumnTypes.Count && rel.ColumnTypes[i].IsStringLike
+                ? "CAST(" + alias + "." + Quote(c) + " AS VARCHAR)"
+                : alias + "." + Quote(c)).ToList();
             _reads.Add((table, alias));
         }
         // the filters apply to the base schema, before the projection
