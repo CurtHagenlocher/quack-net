@@ -280,7 +280,9 @@ function with no extension URN is taken as a DuckDB function of that name, and
 the producer's own extensions (date functions, `IGNORE NULLS` windows) are read.
 Scans with filters and projections, joins (inner, outer, semi, anti, mark,
 single), aggregates with grouping sets and `FILTER`, window functions, set
-operations, sorts and limits, subqueries; not writes, table functions, or a
+operations, sorts and limits, subqueries; and writes: `INSERT … SELECT`,
+`DELETE` (joins allowed) and `UPDATE` of one table, answering the affected-row
+count (`ExecuteUpdate`). Not: `RETURNING`, `MERGE`, table functions, or a
 function of the client's own catalog. What a division by zero or a float outside
 its domain returns follows the plan's function options, checked against the
 server's settings (`ieee_floating_point_ops`, `error_on_division_by_zero`); the
