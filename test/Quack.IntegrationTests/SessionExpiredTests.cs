@@ -68,11 +68,14 @@ public class SessionExpiredTests : IClassFixture<QuackServerFixture>
         await using QuackConnection conn = await QuackConnection.OpenAsync(
             QuackUri.Parse(_server.QuackUri), _server.Token, autoReconnect: true);
 
-        // A multi-chunk result forces a real Fetch round-trip after the
-        // first batch arrives with PrepareResponse. 50k rows comfortably
-        // exceeds the server's chunk size and triggers NeedsMoreFetch.
+        // The result must outgrow what PREPARE carries inline, so a real
+        // Fetch round-trip follows. The server cuts batches at
+        // quack_target_batch_bytes (32 MiB by default) and inlines whole
+        // batches up to quack_prepare_inline_rows (24576), so ~48 MiB of
+        // flat UBIGINTs leaves at least one batch for FETCH. (A bare range()
+        // column is a sequence vector: a few bytes, all of it inline.)
         QuackQueryResult result = await conn.ExecuteAsync(
-            "SELECT i::INTEGER AS i FROM range(50000) t(i)");
+            "SELECT hash(i) AS h FROM range(6000000) t(i)");
 
         await using IAsyncEnumerator<DuckDbChunk> chunks = result
             .GetChunksAsync()
@@ -154,11 +157,31 @@ public class SessionExpiredTests : IClassFixture<QuackServerFixture>
 
         Task<QuackQueryResult> a = conn.ExecuteAsync("SELECT 1 AS a");
         Task<QuackQueryResult> b = conn.ExecuteAsync("SELECT 2 AS b");
-        await Task.WhenAll(a, b);
+        try
+        {
+            await Task.WhenAll(a, b);
+        }
+        catch (QuackException ex) when (ex is not QuackSessionExpiredException)
+        {
+            // Quack version 3 runs one statement per connection: a PREPARE that
+            // arrives while another runs supersedes it. The server (quack
+            // 3bc63c0) can then fail BOTH: the superseded PREPARE's error path
+            // aborts the connection's current statement, which is the newer
+            // one ("query failed"). Neither is what this test is about.
+        }
+        foreach (Task<QuackQueryResult> t in new[] { a, b })
+        {
+            if (!t.IsCompletedSuccessfully)
+            {
+                Assert.IsNotType<QuackSessionExpiredException>(t.Exception!.InnerException);
+            }
+        }
 
         // Exactly one re-handshake should have happened. If both callers
         // raced past the SessionGeneration guard we'd see 2.
         Assert.Equal(1, conn.SessionGeneration);
+        IReadOnlyList<DuckDbChunk> after = await (await conn.ExecuteAsync("SELECT 3 AS c")).ToListAsync();
+        Assert.Equal(1, after.Sum(c => c.RowCount));
     }
 
     private static DuckDbChunk BuildSingleIntChunk(int value)

@@ -34,10 +34,21 @@ internal sealed class QuackAdbcDatabase : AdbcDatabase
             throw AdbcException.NotImplemented(
                 $"Missing required '{QuackAdbcDriver.UriParameter}' parameter.");
         }
+        // quack://host:port/?token=...&tls=... (the other quack ADBC drivers'
+        // form) carries the token and TLS mode; explicit options win.
+        QuackUri parsedUri;
+        try
+        {
+            parsedUri = QuackUri.Parse(uri);
+        }
+        catch (ArgumentException e)
+        {
+            throw new AdbcException(e.Message, AdbcStatusCode.InvalidArgument);
+        }
         if (!_options.TryGetValue(QuackAdbcDriver.TokenParameter, out string? token))
         {
-            throw AdbcException.NotImplemented(
-                $"Missing required '{QuackAdbcDriver.TokenParameter}' parameter.");
+            token = parsedUri.Token ?? throw new AdbcException(
+                $"Missing required '{QuackAdbcDriver.TokenParameter}' parameter (or a token in the URI).", AdbcStatusCode.InvalidArgument);
         }
 
         TimeSpan? defaultCommandTimeout = null;
@@ -58,30 +69,96 @@ internal sealed class QuackAdbcDatabase : AdbcDatabase
             }
         }
 
-        bool useSSL = true;
+        // Unset leaves the choice to QuackUri.Parse: plain HTTP for a loopback
+        // host, TLS otherwise.
+        bool? useSSL = null;
         if (_options.TryGetValue(QuackAdbcDriver.UseSSLParameter, out string? useSSLText) &&
             !string.IsNullOrEmpty(useSSLText))
         {
-            if (!bool.TryParse(useSSLText, out useSSL))
+            if (!bool.TryParse(useSSLText, out bool parsedUseSSL))
             {
                 throw AdbcException.NotImplemented(
                     $"Invalid '{QuackAdbcDriver.UseSSLParameter}' value '{useSSLText}'; expected 'true' or 'false'.");
             }
+            useSSL = parsedUseSSL;
+        }
+
+        bool arrowLossless = false;
+        if (_options.TryGetValue(QuackAdbcDriver.ArrowLosslessConversionParameter, out string? losslessText) &&
+            !string.IsNullOrEmpty(losslessText))
+        {
+            arrowLossless = QuackAdbcConnection.ParseBool(QuackAdbcDriver.ArrowLosslessConversionParameter, losslessText);
         }
 
         // ADBC's contract is synchronous; sync-over-async is acceptable here
         // because OpenAsync is a small handshake (no streaming) and there's
         // no SynchronizationContext to deadlock against in typical hosts.
-        QuackConnection connection = QuackConnection
-            .OpenAsync(QuackUri.Parse(uri, useSSL), token, autoReconnect: autoReconnect)
-            .GetAwaiter()
-            .GetResult();
-        return new QuackAdbcConnection(connection, defaultCommandTimeout);
+        bool skipVerify = parsedUri.SkipCertificateVerification;
+        if (_options.TryGetValue(QuackAdbcDriver.TlsParameter, out string? tlsText) && !string.IsNullOrEmpty(tlsText))
+        {
+            (bool useTls, skipVerify) = QuackUri.ParseTls(tlsText) ?? throw new AdbcException(
+                $"Invalid '{QuackAdbcDriver.TlsParameter}' value '{tlsText}'; expected 'true', 'false' or 'skip_verify'.", AdbcStatusCode.InvalidArgument);
+            if (useSSL is not null && useSSL != useTls)
+            {
+                throw new AdbcException($"'{QuackAdbcDriver.TlsParameter}' contradicts '{QuackAdbcDriver.UseSSLParameter}'.", AdbcStatusCode.InvalidArgument);
+            }
+            useSSL = useTls;
+        }
+        QuackUri target;
+        try
+        {
+            QuackUri resolved = QuackUri.Parse(uri, useSSL);
+            target = new QuackUri(resolved.Host, resolved.Port, resolved.UseSsl, skipVerify && resolved.UseSsl, resolved.Token);
+        }
+        catch (ArgumentException e)
+        {
+            throw new AdbcException(e.Message, AdbcStatusCode.InvalidArgument);
+        }
+        QuackConnection connection;
+        try
+        {
+            connection = QuackConnection
+                .OpenAsync(target, token, autoReconnect: autoReconnect)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (QuackException e)
+        {
+            throw QuackAdbcException.From(e);
+        }
+        return new QuackAdbcConnection(connection, defaultCommandTimeout) { ArrowLossless = arrowLossless };
     }
 
+    private static readonly HashSet<string> KnownOptions =
+    [
+        QuackAdbcDriver.UriParameter,
+        QuackAdbcDriver.TokenParameter,
+        QuackAdbcDriver.UseSSLParameter,
+        QuackAdbcDriver.TlsParameter,
+        QuackAdbcDriver.CommandTimeoutSecondsParameter,
+        QuackAdbcDriver.ReconnectOnSessionLossParameter,
+        QuackAdbcDriver.ArrowLosslessConversionParameter,
+    ];
+
+    // An option the driver does not know is NOT_IMPLEMENTED, as ADBC asks.
     public override void SetOption(string key, string value)
     {
+        if (!KnownOptions.Contains(key))
+        {
+            throw new AdbcException($"Unknown database option '{key}'.", AdbcStatusCode.NotImplemented);
+        }
         _options[key] = value;
+    }
+
+    // The options as set; the token is write-only.
+    public override string GetOption(string key)
+    {
+        if (!string.Equals(key, QuackAdbcDriver.TokenParameter, StringComparison.Ordinal) &&
+            _options.TryGetValue(key, out string? value))
+        {
+            return value;
+        }
+        throw new AdbcException($"Option '{key}' is not set or can't be read.", AdbcStatusCode.NotFound);
     }
 
     internal static TimeSpan ParseCommandTimeoutSeconds(string text)

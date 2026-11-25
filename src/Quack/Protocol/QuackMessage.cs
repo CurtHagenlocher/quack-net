@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0. See LICENSE in the project root for license information.
 
 using System.Buffers;
+using Quack.Data;
 using Quack.Serialization;
 
 namespace Quack.Protocol;
@@ -10,6 +11,10 @@ namespace Quack.Protocol;
 // top-level objects:
 //   1) MessageHeader  (object, 0xFFFF terminator)
 //   2) body fields    (object, 0xFFFF terminator)
+// A chunk-carrying message (FETCH_RESPONSE, SEND_DATA_REQUEST) continues with
+// its raw blob: chunk_count DataChunk objects, each with its own terminator.
+//
+// The wire serialization matches StorageVersion V2_0_0 (quack version 3).
 public abstract record QuackMessage
 {
     public abstract MessageType MessageType { get; }
@@ -33,6 +38,24 @@ public abstract record QuackMessage
         s.BeginObject();
         SerializeBody(s);
         s.EndObject();
+        if (this is SendDataRequestMessage { SerializedChunks: { } serialized })
+        {
+            foreach (ReadOnlyMemory<byte> chunk in serialized)
+            {
+                s.WriteRawBytes(chunk.Span);
+            }
+        }
+        else if (this is IChunkBlobMessage blob)
+        {
+            foreach (DuckDbChunk chunk in blob.Chunks)
+            {
+                if (chunk.RowCount == 0)
+                {
+                    throw new SerializationException("A quack chunk blob must not contain an empty chunk.");
+                }
+                DataChunkWriter.Write(s, chunk);
+            }
+        }
     }
 
     public byte[] ToBytes()
@@ -51,38 +74,58 @@ public abstract record QuackMessage
         MessageHeader header = MessageHeader.Deserialize(d);
         d.EndObject();
         d.BeginObject();
-        QuackMessage body = DeserializeBody(header.Type, d);
+        QuackMessage body = DeserializeBody(header.Type, d, out ulong chunkCount);
         d.EndObject();
+        body = AttachBlob(body, ReadChunkBlob(d, chunkCount));
 
-        // Propagate header fields onto the body via with-style copies.
-        return body switch
-        {
-            ConnectionResponseMessage cr => cr with { ConnectionId = header.ConnectionId, ClientQueryId = header.ClientQueryId },
-            PrepareResponseMessage pr => pr with { ConnectionId = header.ConnectionId, ClientQueryId = header.ClientQueryId },
-            FetchResponseMessage fr => fr with { ConnectionId = header.ConnectionId, ClientQueryId = header.ClientQueryId },
-            SuccessResponse sr => sr with { ConnectionId = header.ConnectionId, ClientQueryId = header.ClientQueryId },
-            ErrorResponse er => er with { ConnectionId = header.ConnectionId, ClientQueryId = header.ClientQueryId },
-            ConnectionRequestMessage cq => cq with { ConnectionId = header.ConnectionId, ClientQueryId = header.ClientQueryId },
-            PrepareRequestMessage pq => pq with { ConnectionId = header.ConnectionId, ClientQueryId = header.ClientQueryId },
-            FetchRequestMessage fq => fq with { ConnectionId = header.ConnectionId, ClientQueryId = header.ClientQueryId },
-            AppendRequestMessage aq => aq with { ConnectionId = header.ConnectionId, ClientQueryId = header.ClientQueryId },
-            DisconnectMessage dm => dm with { ConnectionId = header.ConnectionId, ClientQueryId = header.ClientQueryId },
-            _ => body,
-        };
+        // Propagate header fields onto the body.
+        return body with { ConnectionId = header.ConnectionId, ClientQueryId = header.ClientQueryId };
     }
 
-    private static QuackMessage DeserializeBody(MessageType type, BinaryDeserializer d) => type switch
+    private static List<DuckDbChunk> ReadChunkBlob(BinaryDeserializer d, ulong chunkCount)
     {
-        MessageType.ConnectionRequest => ConnectionRequestMessage.DeserializeBody(d),
-        MessageType.ConnectionResponse => ConnectionResponseMessage.DeserializeBody(d),
-        MessageType.PrepareRequest => PrepareRequestMessage.DeserializeBody(d),
-        MessageType.PrepareResponse => PrepareResponseMessage.DeserializeBody(d),
-        MessageType.FetchRequest => FetchRequestMessage.DeserializeBody(d),
-        MessageType.FetchResponse => FetchResponseMessage.DeserializeBody(d),
-        MessageType.AppendRequest => AppendRequestMessage.DeserializeBody(d),
-        MessageType.SuccessResponse => SuccessResponse.DeserializeBody(d),
-        MessageType.DisconnectMessage => DisconnectMessage.DeserializeBody(d),
-        MessageType.ErrorResponse => ErrorResponse.DeserializeBody(d),
-        _ => throw new SerializationException($"Unsupported message type '{type}' ({(int)type})."),
+        // The count comes from the wire: cap the reservation, a false count fails on the read.
+        List<DuckDbChunk> chunks = new((int)Math.Min(chunkCount, 1024));
+        for (ulong i = 0; i < chunkCount; i++)
+        {
+            chunks.Add(DataChunkReader.Read(d));
+        }
+        return chunks;
+    }
+
+    private static QuackMessage AttachBlob(QuackMessage body, List<DuckDbChunk> chunks) => body switch
+    {
+        FetchResponseMessage fr => fr with { Results = chunks },
+        SendDataRequestMessage sd => sd with { Chunks = chunks },
+        _ => body,
     };
+
+    private static QuackMessage DeserializeBody(MessageType type, BinaryDeserializer d, out ulong chunkCount)
+    {
+        chunkCount = 0;
+        switch (type)
+        {
+            case MessageType.FetchResponse:
+                return FetchResponseMessage.DeserializeBody(d, out chunkCount);
+            case MessageType.SendDataRequest:
+                return SendDataRequestMessage.DeserializeBody(d, out chunkCount);
+            default:
+                return type switch
+                {
+                    MessageType.ConnectionRequest => ConnectionRequestMessage.DeserializeBody(d),
+                    MessageType.ConnectionResponse => ConnectionResponseMessage.DeserializeBody(d),
+                    MessageType.PrepareRequest => PrepareRequestMessage.DeserializeBody(d),
+                    MessageType.PrepareResponse => PrepareResponseMessage.DeserializeBody(d),
+                    MessageType.FetchRequest => FetchRequestMessage.DeserializeBody(d),
+                    MessageType.SendDataResponse => SendDataResponseMessage.DeserializeBody(d),
+                    MessageType.SuccessResponse => SuccessResponse.DeserializeBody(d),
+                    MessageType.DisconnectMessage => DisconnectMessage.DeserializeBody(d),
+                    MessageType.CancelRequest => CancelRequestMessage.DeserializeBody(d),
+                    MessageType.Acknowledgement => AcknowledgementMessage.DeserializeBody(d),
+                    MessageType.HeartbeatRequest => HeartbeatRequestMessage.DeserializeBody(d),
+                    MessageType.ErrorResponse => ErrorResponse.DeserializeBody(d),
+                    _ => throw new SerializationException($"Unsupported message type '{type}' ({(int)type})."),
+                };
+        }
+    }
 }

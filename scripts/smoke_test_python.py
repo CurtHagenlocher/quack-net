@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import socket
+import threading
 import subprocess
 import sys
 import time
@@ -26,6 +27,7 @@ import uuid
 from pathlib import Path
 
 import adbc_driver_manager.dbapi
+import pyarrow as pa
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -136,6 +138,108 @@ def run_smoke_test(dll: Path, duckdb_exe: Path) -> None:
             schema = conn.adbc_get_table_schema("smoke")
             assert [f.name for f in schema] == ["id", "name"], f"unexpected schema: {schema}"
             print(f"[smoke] GetTableSchema -> {[f.name + ':' + str(f.type) for f in schema]}", flush=True)
+
+            # 5) Bulk ingest (adbc.ingest.* options + a bound stream).
+            def batch(start: int, count: int) -> pa.RecordBatch:
+                return pa.record_batch(
+                    [pa.array(range(start, start + count), pa.int64()),
+                     pa.array([f"n{i}" for i in range(start, start + count)], pa.string())],
+                    names=["id", "name"],
+                )
+
+            def rows(sql: str):
+                with conn.cursor() as cur:
+                    cur.execute(sql)
+                    return cur.fetchall()
+
+            reader = pa.RecordBatchReader.from_batches(batch(0, 0).schema, [batch(0, 3), batch(3, 0), batch(3, 2)])
+            with conn.cursor() as cur:
+                assert cur.adbc_ingest("ingested", reader, mode="create") == 5
+                assert cur.adbc_ingest("ingested", batch(5, 2), mode="append") == 2
+                assert cur.adbc_ingest("ingested2", pa.Table.from_batches([batch(0, 4)]), mode="create_append") == 4
+                assert cur.adbc_ingest("ingested2", batch(4, 1), mode="create_append") == 1
+                assert cur.adbc_ingest("ingested2", batch(100, 1), mode="replace") == 1
+                assert cur.adbc_ingest("tmp_ingest", batch(0, 2), mode="create", temporary=True) == 2
+            assert rows("SELECT count(*), min(id), max(id) FROM ingested") == [(7, 0, 6)]
+            assert rows("SELECT column_name, data_type FROM duckdb_columns() WHERE table_name = 'ingested' ORDER BY column_index") == [
+                ("id", "BIGINT"), ("name", "VARCHAR")]
+            assert rows("SELECT id, name FROM ingested2") == [(100, "n100")]
+            assert rows("SELECT count(*) FROM temp.main.tmp_ingest") == [(2,)]
+            print("[smoke] adbc_ingest create/append/create_append/replace/temporary -> ok", flush=True)
+
+            # 6) ADBC 1.1 through the C API.
+            assert info.get("driver_adbc_version") == 1_001_000, info.get("driver_adbc_version")
+            with conn.cursor() as cur:
+                cur.adbc_statement.set_options(**{"adbc.ingest.target_table": "t"})
+                assert cur.adbc_statement.get_option("adbc.ingest.target_table") == "t"
+            assert conn.adbc_connection.get_option("adbc.connection.catalog") == "memory"
+            with conn.cursor() as cur:
+                cur.execute("CREATE SCHEMA smoke_s")
+            conn.adbc_connection.set_options(**{"adbc.connection.db_schema": "smoke_s"})
+            assert conn.adbc_connection.get_option("adbc.connection.db_schema") == "smoke_s"
+            assert rows("SELECT current_schema()") == [("smoke_s",)]
+            conn.adbc_connection.set_options(**{"adbc.connection.db_schema": "main"})
+            with conn.cursor() as cur:
+                schema = cur.adbc_execute_schema("SELECT 1::INTEGER AS a, 'x' AS b")
+                assert [(f.name, str(f.type)) for f in schema] == [("a", "int32"), ("b", "string")], schema
+            handle = conn.adbc_connection.get_statistics(None, "main", "ingested", True)
+            stats = pa.RecordBatchReader._import_from_c(handle.address).read_all()
+            catalogs = stats.to_pylist()
+            assert catalogs[0]["catalog_db_schemas"][0]["db_schema_statistics"][0]["statistic_key"] == 6, catalogs
+
+            # Cancel from another thread while the query runs.
+            with conn.cursor() as cur:
+                failure: list[BaseException] = []
+
+                def run() -> None:
+                    try:
+                        cur.execute("SELECT sum(a.range * b.range) FROM range(1000000) a, range(1000000) b")
+                        cur.fetchall()
+                    except BaseException as e:  # noqa: BLE001
+                        failure.append(e)
+
+                worker = threading.Thread(target=run)
+                worker.start()
+                deadline = time.monotonic() + 30
+                while worker.is_alive() and time.monotonic() < deadline:
+                    time.sleep(0.2)
+                    cur.adbc_cancel()
+                worker.join(30)
+                assert not worker.is_alive(), "cancel did not stop the query"
+                assert failure and "CANCELLED" in str(failure[0]).upper(), failure
+            # The DB-API runs with autocommit off: the cancel aborted the transaction.
+            conn.rollback()
+            assert rows("SELECT 42") == [(42,)]
+            print("[smoke] ADBC 1.1 (version, GetOption, catalog/schema, ExecuteSchema, statistics, cancel) -> ok", flush=True)
+
+        # 7) Transactions, through a second connection opened without an
+        # entrypoint (AdbcDriverInit, the driver manager's default).
+        with adbc_driver_manager.dbapi.connect(
+            driver=str(dll),
+            db_kwargs={"uri": f"quack:127.0.0.1:{port}", "token": token},
+        ) as writer, adbc_driver_manager.dbapi.connect(
+            driver=str(dll),
+            db_kwargs={"uri": f"quack:127.0.0.1:{port}", "token": token},
+            autocommit=True,
+        ) as reader:
+            def count() -> int:
+                with reader.cursor() as cur:
+                    cur.execute("SELECT count(*) FROM txn_smoke")
+                    return cur.fetchone()[0]
+
+            with writer.cursor() as cur:
+                cur.execute("CREATE TABLE txn_smoke (i INTEGER)")
+            writer.commit()
+            with writer.cursor() as cur:
+                cur.execute("INSERT INTO txn_smoke VALUES (1), (2)")
+            assert count() == 0
+            writer.commit()
+            assert count() == 2
+            with writer.cursor() as cur:
+                cur.execute("INSERT INTO txn_smoke VALUES (3)")
+            writer.rollback()
+            assert count() == 2
+            print("[smoke] AdbcDriverInit + commit/rollback -> ok", flush=True)
 
         print("[smoke] ALL CHECKS PASSED", flush=True)
     finally:

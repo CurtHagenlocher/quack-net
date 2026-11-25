@@ -6,7 +6,7 @@ using Quack.Serialization;
 namespace Quack.Types;
 
 // Mirror of duckdb::ExtraTypeInfo. Wire layout
-// (src/storage/serialization/serialize_types.cpp in duckdb/duckdb v1.5.x):
+// (src/storage/serialization/serialize_types.cpp in duckdb/duckdb v2.0.x):
 //   field 100: type  (ExtraTypeInfoKind, uint8 -> LEB128)
 //   field 101: alias (string, default-omit)
 //   field 102: [deleted — was vector<Value> "modifiers"; default-omitted in

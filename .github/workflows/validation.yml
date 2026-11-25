@@ -1,0 +1,52 @@
+name: Validation
+
+# The ADBC validation suite (validation/) and the integration + ADBC tests,
+# against a stock DuckDB CLI serving quack.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  DUCKDB_VERSION: v2.0.1
+
+jobs:
+  validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: DuckDB CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/duckdb"
+          curl -fsSL "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb-cli-linux-amd64.tar.gz" | tar xz -C "$RUNNER_TEMP/duckdb"
+          echo "QUACK_TEST_DUCKDB=$RUNNER_TEMP/duckdb/duckdb" >> "$GITHUB_ENV"
+
+      - name: Integration and ADBC tests
+        run: |
+          dotnet test test/Quack.IntegrationTests -c Release
+          dotnet test test/Quack.Adbc.Tests -c Release
+
+      - name: Publish the native driver
+        run: dotnet publish src/Quack.Adbc.Native -c Release -r linux-x64
+
+      - name: Validation suite (TLS, then plain HTTP)
+        run: |
+          pip install -r validation/requirements.txt
+          python validation/run.py --junitxml=validation-tls.xml
+          python validation/run.py --plain --junitxml=validation-plain.xml
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validation-results
+          path: validation/validation-*.xml

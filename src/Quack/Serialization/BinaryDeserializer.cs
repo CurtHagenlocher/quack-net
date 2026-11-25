@@ -69,6 +69,10 @@ internal sealed class BinaryDeserializer
         }
     }
 
+    // Returns true if the next field id is `fieldId`, without consuming it and
+    // without the ordering check, for a reader that must tell two layouts apart.
+    public bool NextFieldIs(ushort fieldId) => PeekField() == fieldId;
+
     // Returns true if the next field id matches `fieldId` (and consumes it),
     // false if the next field is past it (and leaves it buffered for the next
     // call). Throws if the next field id is below `fieldId`, which indicates

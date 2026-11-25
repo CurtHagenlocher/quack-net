@@ -4,7 +4,7 @@
 namespace Quack.Data;
 
 // Mirror of duckdb::VectorType
-// (src/include/duckdb/common/enums/vector_type.hpp in duckdb/duckdb v1.5.x).
+// (src/include/duckdb/common/enums/vector_type.hpp in duckdb/duckdb v2.0.x).
 // The default-on-the-wire value is FLAT.
 internal enum VectorType : byte
 {
@@ -13,4 +13,6 @@ internal enum VectorType : byte
     Constant = 2,
     Dictionary = 3,
     Sequence = 4,
+    // Shredded VARIANT (DuckDB 2.0+).
+    Shredded = 5,
 }

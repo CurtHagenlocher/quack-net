@@ -18,8 +18,11 @@ namespace Quack.TestFixtures;
 public sealed class QuackServerFixture : IAsyncLifetime
 {
     public const string DefaultDuckDbExePath = @"C:\src\duckdb\duckdb.exe";
+    // Overrides DefaultDuckDbExePath, e.g. to point at a DuckDB 2.0.x CLI.
+    public const string DuckDbExePathVariable = "QUACK_TEST_DUCKDB";
 
-    public string DuckDbExePath { get; init; } = DefaultDuckDbExePath;
+    public string DuckDbExePath { get; init; } =
+        Environment.GetEnvironmentVariable(DuckDbExePathVariable) is { Length: > 0 } fromEnv ? fromEnv : DefaultDuckDbExePath;
     public string Token { get; private set; } = string.Empty;
     public int Port { get; private set; }
     // 127.0.0.1 (vs "localhost") avoids OS getaddrinfo deciding between IPv4
@@ -38,7 +41,7 @@ public sealed class QuackServerFixture : IAsyncLifetime
         if (!File.Exists(DuckDbExePath))
         {
             throw new FileNotFoundException(
-                $"DuckDB executable not found at '{DuckDbExePath}'. Integration tests require a local v1.5+ build with the quack extension available.",
+                $"DuckDB executable not found at '{DuckDbExePath}'. Integration tests require a DuckDB 2.0.x CLI (quack protocol version 3); set {DuckDbExePathVariable} to its path.",
                 DuckDbExePath);
         }
 
@@ -70,11 +73,12 @@ public sealed class QuackServerFixture : IAsyncLifetime
 
         StreamWriter input = _process.StandardInput;
         await input.WriteLineAsync(".bail on").ConfigureAwait(false);
-        await input.WriteLineAsync("INSTALL quack FROM core_nightly;").ConfigureAwait(false);
+        // quack ships as a core extension for DuckDB 2.0.x.
+        await input.WriteLineAsync("INSTALL quack FROM core;").ConfigureAwait(false);
         await input.WriteLineAsync("LOAD quack;").ConfigureAwait(false);
         // spatial is preinstalled by the user; LOAD is enough. Best-effort
         // INSTALL keeps the fixture usable on machines where it's absent.
-        await input.WriteLineAsync("INSTALL spatial;").ConfigureAwait(false);
+        await input.WriteLineAsync("INSTALL spatial FROM core;").ConfigureAwait(false);
         await input.WriteLineAsync("LOAD spatial;").ConfigureAwait(false);
         await input.WriteLineAsync($"CALL quack_serve('{QuackUri}', token => '{Token}');").ConfigureAwait(false);
         await input.FlushAsync().ConfigureAwait(false);

@@ -34,10 +34,10 @@ public static class DuckDbTimestamp
 
     public static DateTimeOffset GetDateTimeOffset(FixedSizeColumn column, int rowIndex)
     {
-        if (column.Type.Id != LogicalTypeId.TimestampTz)
+        if (column.Type.Id is not (LogicalTypeId.TimestampTz or LogicalTypeId.TimestampTzNs))
         {
             throw new InvalidOperationException(
-                $"GetDateTimeOffset requires TIMESTAMP_TZ; got {column.Type.Id}. Use GetDateTime for naive timestamps.");
+                $"GetDateTimeOffset requires TIMESTAMP_TZ or TIMESTAMP_TZ_NS; got {column.Type.Id}. Use GetDateTime for naive timestamps.");
         }
         return new DateTimeOffset(GetDateTime(column, rowIndex), TimeSpan.Zero);
     }
@@ -83,7 +83,7 @@ public static class DuckDbTimestamp
             throw new OverflowException(
                 $"TIMESTAMP value {raw} is the {(raw > 0 ? "positive" : "negative")} infinity sentinel; use GetRaw for raw access.");
         }
-        DateTimeKind dtKind = kind == LogicalTypeId.TimestampTz ? DateTimeKind.Utc : DateTimeKind.Unspecified;
+        DateTimeKind dtKind = kind is LogicalTypeId.TimestampTz or LogicalTypeId.TimestampTzNs ? DateTimeKind.Utc : DateTimeKind.Unspecified;
         try
         {
             DateTime result = kind switch
@@ -91,7 +91,7 @@ public static class DuckDbTimestamp
                 LogicalTypeId.Timestamp or LogicalTypeId.TimestampTz => UnixEpochUtc.AddTicks(raw * 10L),
                 LogicalTypeId.TimestampSec => UnixEpochUtc.AddSeconds(raw),
                 LogicalTypeId.TimestampMs => UnixEpochUtc.AddMilliseconds(raw),
-                LogicalTypeId.TimestampNs => UnixEpochUtc.AddTicks(raw / 100L),
+                LogicalTypeId.TimestampNs or LogicalTypeId.TimestampTzNs => UnixEpochUtc.AddTicks(raw / 100L),
                 _ => throw new InvalidOperationException(
                     $"LogicalTypeId {kind} is not a TIMESTAMP variant."),
             };
@@ -112,7 +112,7 @@ public static class DuckDbTimestamp
             LogicalTypeId.Timestamp or LogicalTypeId.TimestampTz => ticksSinceEpoch / 10L,
             LogicalTypeId.TimestampSec => ticksSinceEpoch / TimeSpan.TicksPerSecond,
             LogicalTypeId.TimestampMs => ticksSinceEpoch / TimeSpan.TicksPerMillisecond,
-            LogicalTypeId.TimestampNs => checked(ticksSinceEpoch * 100L),
+            LogicalTypeId.TimestampNs or LogicalTypeId.TimestampTzNs => checked(ticksSinceEpoch * 100L),
             _ => throw new InvalidOperationException(
                 $"LogicalTypeId {kind} is not a TIMESTAMP variant."),
         };
@@ -120,7 +120,7 @@ public static class DuckDbTimestamp
 
     private static DateTime NormalizeForKind(DateTime value, LogicalTypeId kind)
     {
-        if (kind == LogicalTypeId.TimestampTz)
+        if (kind is LogicalTypeId.TimestampTz or LogicalTypeId.TimestampTzNs)
         {
             // TIMESTAMP_TZ is stored as UTC. Local -> convert; Unspecified ->
             // assume UTC (no info to do otherwise).
@@ -144,6 +144,7 @@ public static class DuckDbTimestamp
             case LogicalTypeId.TimestampMs:
             case LogicalTypeId.TimestampNs:
             case LogicalTypeId.TimestampTz:
+            case LogicalTypeId.TimestampTzNs:
                 return;
             default:
                 throw new ArgumentOutOfRangeException(nameof(kind),
@@ -173,6 +174,7 @@ public static class DuckDbTimestamp
             case LogicalTypeId.TimestampMs:
             case LogicalTypeId.TimestampNs:
             case LogicalTypeId.TimestampTz:
+            case LogicalTypeId.TimestampTzNs:
                 return;
             default:
                 throw new InvalidOperationException(

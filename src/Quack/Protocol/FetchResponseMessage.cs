@@ -6,44 +6,35 @@ using Quack.Serialization;
 
 namespace Quack.Protocol;
 
-public sealed record FetchResponseMessage : QuackMessage
+// One dense batch of a result. The body holds only the counts; the chunks
+// follow the body as a raw blob of ChunkCount self-describing DataChunk
+// objects. A response with no chunks is terminal and carries TotalBatches, so
+// the client can check that it received every batch.
+public sealed record FetchResponseMessage : QuackMessage, IChunkBlobMessage
 {
     public override MessageType MessageType => MessageType.FetchResponse;
 
     public IReadOnlyList<DuckDbChunk> Results { get; init; } = [];
     public ulong? BatchIndex { get; init; }
+    public ulong? TotalBatches { get; init; }
 
     public bool IsEndOfStream => Results.Count == 0;
 
+    IReadOnlyList<DuckDbChunk> IChunkBlobMessage.Chunks => Results;
+
     internal override void SerializeBody(BinarySerializer s)
     {
-        throw new NotSupportedException("FetchResponseMessage serialization is server-side only.");
+        s.WritePropertyWithDefault(fieldId: 1, (ulong)Results.Count);
+        OptionalIdx.WritePropertyWithDefault(s, fieldId: 2, TotalBatches);
+        OptionalIdx.WritePropertyWithDefault(s, fieldId: 3, BatchIndex);
     }
 
-    internal static FetchResponseMessage DeserializeBody(BinaryDeserializer d)
+    internal static FetchResponseMessage DeserializeBody(BinaryDeserializer d, out ulong chunkCount)
     {
-        List<DuckDbChunk> results = [];
-        if (d.TryBeginProperty(fieldId: 1))
-        {
-            ulong count = d.BeginList();
-            for (ulong i = 0; i < count; i++)
-            {
-                DuckDbChunk? chunk = DataChunkWrapper.ReadChunk(d);
-                if (chunk is not null) results.Add(chunk);
-            }
-            d.EndList();
-        }
-
-        // batch_index is optional_idx -> a single uint64 LEB128 with
-        // ulong.MaxValue meaning "invalid".
-        d.BeginProperty(fieldId: 2);
-        ulong raw = d.ReadUInt64();
-        ulong? batchIndex = raw == MessageHeader.OptionalIdxInvalid ? null : raw;
-
-        return new FetchResponseMessage
-        {
-            Results = results,
-            BatchIndex = batchIndex,
-        };
+        chunkCount = 0;
+        if (d.TryBeginProperty(fieldId: 1)) chunkCount = d.ReadUInt64();
+        ulong? totalBatches = OptionalIdx.ReadPropertyWithDefault(d, fieldId: 2);
+        ulong? batchIndex = OptionalIdx.ReadPropertyWithDefault(d, fieldId: 3);
+        return new FetchResponseMessage { TotalBatches = totalBatches, BatchIndex = batchIndex };
     }
 }

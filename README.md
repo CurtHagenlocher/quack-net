@@ -3,7 +3,8 @@
 A pure-managed .NET client and Apache Arrow ADBC driver for DuckDB's `quack`
 remote protocol.
 
-> Status: experimental. The wire format (`v1.5-variegata`) and DuckDB's
+> Status: experimental. The wire format (quack protocol version 3, as served
+> by the `quack` extension of DuckDB `v2.0-cyanoptera`) and DuckDB's
 > server-side support are still in flux. Treat this as a moving target.
 
 ## What's in the box
@@ -16,17 +17,88 @@ remote protocol.
 
 ## Server requirements
 
-You need a DuckDB build that supports the `quack` extension. Today that means
-DuckDB **v1.5+** with the `quack` extension installed from `core_nightly`, and
-the protocol revision pinned to `v1.5-variegata`
-(`SerializationCompatibility(7)`). The integration test fixture installs the
-extension on demand:
+You need DuckDB **v2.0.x** with the `quack` core extension: quack protocol
+version 3, data serialized for storage version `V2_0_0` (verified against
+DuckDB v2.0.1 with quack `3bc63c0`). DuckDB 1.5's quack speaks protocol
+version 1 and is not supported by this client any more; the server rejects
+the handshake. The integration test fixture installs the extension on demand:
 
 ```sql
-INSTALL quack FROM core_nightly;
+INSTALL quack FROM core;
 LOAD quack;
 CALL quack_serve('quack:127.0.0.1:9494', token => 'your-token');
 ```
+
+The integration tests start the DuckDB CLI named by `QUACK_TEST_DUCKDB`
+(default `C:\src\duckdb\duckdb.exe`).
+
+### What protocol version 3 means for clients
+
+- **Heartbeat lease.** The server keeps a session only while it hears from it
+  at least once per heartbeat timeout (60 s by default,
+  `QuackConnectionOptions.HeartbeatTimeoutSeconds`). `QuackConnection` sends a
+  heartbeat about every third of that in the background; an expired lease
+  surfaces as `QuackSessionExpiredException`.
+- **One statement per connection.** A new query supersedes the one still
+  running on the same connection (it fails with *superseded by a new query*;
+  with quack `3bc63c0` the newer one can fail too, with *query failed*). Use
+  one `QuackConnection` per concurrent query.
+- **Cancel.** Cancelling the `CancellationToken` of `ExecuteAsync`,
+  `AppendAsync` or `GetChunksAsync` interrupts the query on the server and
+  keeps the connection usable (it throws `OperationCanceledException`). Only
+  if the server does not stop the query within 10 s is the HTTP request
+  aborted, and then the connection is unusable (`QuackConnection.IsUsable`).
+  `QuackConnection.CancelAsync(queryUuid)` sends the interrupt directly
+  (`QuackQueryResult.QueryUuid`; `Int128.Zero` = whatever runs). The ADBC
+  driver's `command_timeout_seconds` uses the same path.
+- **Fetch.** Results arrive in dense, numbered batches (the leading ones inline
+  with PREPARE); the client checks the announced batch count and acknowledges
+  a complete result.
+- **Append.** `AppendAsync` runs one `INSERT INTO t SELECT * FROM
+  scan_data_from_quack_client(...)` per call and streams the chunks as
+  `SEND_DATA` batches (cut at 2048 rows); it returns the inserted row count.
+  Rows map to columns by position, as before.
+- **Errors** carry the server's exception type
+  (`QuackException.ServerExceptionType`, e.g. `Catalog`).
+
+### VARIANT
+
+VARIANT columns arrive as `VariantColumn` with one `DuckDbVariant` per row
+(null = SQL NULL; `DuckDbVariantType.Null` = a variant null). Every DuckDB
+variant type is decoded losslessly, from both forms DuckDB 2.0 sends: the
+canonical layout and SHREDDED vectors (typed columns plus an untyped
+overlay; DuckDB sends them for a column cast to VARIANT and for VARIANT
+columns a checkpoint shredded). Object fields keep the variant's order; for a
+shredded value that is the typed fields first, then the leftover ones. The
+values are decoded on first access to `VariantColumn.Values`; until then the
+column holds the received vector (and with it the response buffer).
+
+Through ADBC a VARIANT column is `arrow.parquet.variant` (Apache.Arrow's
+`VariantArray`) holding the bytes DuckDB's own Arrow export writes (checked
+against `variant_to_parquet_variant`), converted straight from the received
+vector without building `DuckDbVariant` values. The type mapping is DuckDB's:
+unsigned and 128-bit integers widen to the next signed type (UINT32 and
+wider to INT64 when the value fits), and INTERVAL, BIGNUM, BITSTRING,
+TIMESTAMP_S / _MS, TIME_TZ, TIME_NS, TIMESTAMP_NS WITH TIME ZONE and GEOMETRY
+values are refused, as DuckDB refuses them.
+
+The client writes and reads the Parquet Variant bytes itself: Apache.Arrow
+23.0.0's `VariantBuilder` and `VariantReader` swap the field-id and
+field-offset sizes of an object header (fixed after 23.0.0,
+apache/arrow-dotnet#421). With 23.0.0, `VariantArray.GetVariantValue` fails
+on an object whose field values take more than 255 bytes, for these values
+and for DuckDB's or Spark's; values Apache.Arrow 23.0.0 encoded such objects
+in are misread by everyone else, this client included.
+
+VARIANT values can also be sent: `AppendAsync` with a `VariantColumn`
+(type `LogicalType.Variant`) and ADBC ingest of `arrow.parquet.variant`. The
+client writes DuckDB's canonical layout (values in pre-order, object fields
+sorted by key, as DuckDB's own builder writes them); a root variant null is
+sent as SQL NULL. Ingested Parquet variant values map like DuckDB's Parquet
+reader maps them (TIMESTAMP with time zone to TIMESTAMPTZ, DECIMAL4/8 to the
+width of the value's digits, DECIMAL16 to width 38). A shredded
+`arrow.parquet.variant` input (with `typed_value`) is merged by Apache.Arrow,
+so its leftover object values are read with 23.0.0's header layout.
 
 ## Using `Quack` from .NET
 
@@ -38,12 +110,12 @@ await using QuackConnection conn = await QuackConnection.OpenAsync(
     token: "your-token");
 
 QuackQueryResult result = await conn.ExecuteAsync(
-    "SELECT id, name FROM users WHERE id < ?",
-    parameters: [10]);
+    "SELECT id, name FROM users WHERE id < 10");
 
-await foreach (DuckDbChunk chunk in result.ReadChunksAsync())
+await foreach (DuckDbChunk chunk in result.GetChunksAsync())
 {
-    // chunk.RowCount, chunk.Columns[0] as IntegerColumn, etc.
+    // chunk.RowCount; chunk.Columns[0] is a FixedSizeColumn (INTEGER),
+    // chunk.Columns[1] a VarBytesColumn (VARCHAR, UTF-8 bytes).
 }
 ```
 
@@ -66,6 +138,161 @@ stmt.SqlQuery = "SELECT 1 AS x";
 QueryResult qr = stmt.ExecuteQuery();
 RecordBatch? batch = await qr.Stream!.ReadNextRecordBatchAsync();
 ```
+
+### Connection options and errors
+
+| option | meaning |
+|---|---|
+| `uri` | `quack:host[:port]`, or `quack://host[:port]/?token=...&tls=true\|false\|skip_verify` (the form the other quack ADBC drivers take) |
+| `token` | the server's token; overrides one in the URI |
+| `quack.tls` | `true` (verified TLS), `false` (plain HTTP) or `skip_verify` (TLS, any certificate); without it (or `tls` in the URI, or `use_ssl`), plain HTTP for a loopback host and TLS otherwise, like DuckDB's own client |
+| `use_ssl` | `true` / `false`, the older form of `quack.tls` |
+| `command_timeout_seconds` | per-call timeout (also a statement option) |
+| `reconnect_on_session_loss` | re-establish a lost session (not inside a transaction) |
+| `quack.arrow_lossless_conversion` | `true`: result types as DuckDB's `arrow_lossless_conversion` exports them (see Results); also a connection option |
+
+Errors carry an ADBC status from DuckDB's exception type (Catalog:
+`NOT_FOUND` / `ALREADY_EXISTS`, Constraint: `INTEGRITY`, Parser / Binder:
+`INVALID_ARGUMENT`, Conversion / Invalid Input: `INVALID_DATA`, Interrupt:
+`CANCELLED`, ...), and the exception type, `must_invalidate` and the server's
+`extra_info` as error details (`quack.exception_type`, ...). A bulk append
+whose data does not fit the table is `ALREADY_EXISTS`, as ADBC defines it.
+An error that says the server's own database died (`must_invalidate`) leaves
+the connection unusable.
+
+### Results
+
+- `ExecuteUpdate` returns DuckDB's own row count for INSERT, UPDATE, DELETE
+  and CREATE TABLE AS, and -1 when the statement reports none (DDL, a query).
+- The Arrow types are DuckDB's own Arrow export's (checked column by column
+  against DuckDB 2.0.1's, values included), in both of its modes:
+
+  | DuckDB type | default | `quack.arrow_lossless_conversion` |
+  |---|---|---|
+  | BOOLEAN | `bool` | `arrow.bool8` |
+  | HUGEINT | `decimal128(38, 0)` | `arrow.opaque` (`hugeint`), 16 bytes |
+  | UHUGEINT | `decimal128(38, 0)` over its bits, so values from 2^127 read negative | `arrow.opaque` (`uhugeint`), 16 bytes |
+  | TIME WITH TIME ZONE | `time64[us]`, the time of day without its offset | `arrow.opaque` (`time_tz`), DuckDB's 8 bytes |
+  | UUID | its text | `arrow.uuid` |
+  | BIT | `binary` (DuckDB's bytes) | `arrow.opaque` (`bit`) |
+  | BIGNUM | `arrow.opaque` (`bignum`) | the same |
+  | GEOMETRY | `binary` WKB with `geoarrow.wkb` | the same |
+  | UNION | a sparse union; type ids are the member indexes, and a NULL row is member 0 with a null value | the same |
+
+  The opaque types carry `vendor_name` DuckDB. Ingest takes all of these back
+  (a DuckDB lossless result ingests to the same types and values); without the
+  extension metadata, `arrow.uuid` becomes a UUID and any other fixed-size
+  binary a BLOB. DuckDB itself fails on one round trip of its default form: a
+  HUGEINT below -10^38 ingested back as `DECIMAL(38,0)` makes a cast of it to
+  VARCHAR raise an INTERNAL error, which invalidates the server's database.
+- DuckDB 2.0's NULL type (a column of only NULLs) is Arrow's `null` type, both
+  ways.
+- Ingest also takes large and view strings and binary, `time32`, negative
+  decimal scales (as `DECIMAL(p + |s|, 0)`) and dictionaries, which are
+  decoded to their value type (an existing ENUM column takes the strings).
+- INTERVAL is `month_day_nano`; microseconds beyond the nanosecond range wrap,
+  as in DuckDB's export.
+- A value without an Arrow form (an INTERVAL inside a VARIANT, which the
+  Parquet variant spec cannot express) fails with
+  `ADBC_STATUS_NOT_IMPLEMENTED`; the query is cancelled on the server and the
+  connection stays usable. So is any result that is released before its end.
+  Through the C API the error reaches the consumer from the stream's
+  `get_next`, which carries only an errno (Python sees an `OSError` with the
+  message).
+
+### Bulk ingest
+
+ADBC's standard bulk ingest: set `adbc.ingest.target_table` (plus, as
+needed, `adbc.ingest.mode`, `adbc.ingest.target_catalog`,
+`adbc.ingest.target_db_schema`, `adbc.ingest.temporary`), bind a batch with
+`Bind` or a stream with `BindStream`, and call `ExecuteUpdate`, which returns
+the number of rows written.
+
+```csharp
+using AdbcStatement ingest = conn.CreateStatement();
+ingest.SetOption("adbc.ingest.target_table", "events");
+ingest.SetOption("adbc.ingest.mode", "adbc.ingest.mode.create_append");
+ingest.BindStream(reader);                 // any IArrowArrayStream
+long rows = ingest.ExecuteUpdate().AffectedRows;
+```
+
+| mode | statement |
+|---|---|
+| `create` (the default) | `CREATE TABLE t AS SELECT * FROM <stream>`; fails if t exists |
+| `append` | `INSERT INTO t SELECT * FROM <stream>`; fails if t does not exist |
+| `replace` | `CREATE OR REPLACE TABLE t AS SELECT * FROM <stream>` |
+| `create_append` | `CREATE TABLE IF NOT EXISTS t (...)`, then the append |
+
+The rows travel as one client data stream (`scan_data_from_quack_client`):
+the batches are sent as they are read, in batches of about 32 MiB, and each
+one is released once it has been serialized. `create`, `replace` and
+`append` are a single statement each; `create_append`'s two are not atomic.
+A created table takes the Arrow schema's column names and DuckDB types; an
+append matches columns by position. A temporary target is `temp.main` and
+can't be combined with a catalog or schema.
+
+The older form still works: without `adbc.ingest.target_table`, a bound batch
+or stream is appended to the existing table that `SqlQuery` names.
+
+### ADBC 1.1
+
+The driver implements ADBC API revision 1.1.0 (and still answers a 1.0.0
+driver manager):
+
+- `StatementCancel` stops the statement's running query, ingest or result
+  stream, and `ConnectionCancel` everything running on the connection; the
+  query is cancelled on the server, the call fails with `ADBC_STATUS_CANCELLED`
+  and the connection stays usable. `command_timeout_seconds` uses the same path.
+- `GetOption` returns the statement's ingest options and timeout, and the
+  database's options except the token.
+- `adbc.connection.catalog` and `adbc.connection.db_schema` read
+  `current_database()` / `current_schema()` and set them with `USE`.
+- `ExecuteSchema` describes a query without running it (as
+  `SELECT * FROM (<query>) LIMIT 0`, which DuckDB answers without a scan and
+  which refuses any statement that is not a query).
+- `GetStatistics` returns a row count per table (`adbc.statistic.row_count`)
+  from DuckDB's estimate, marked approximate; there are no driver-specific
+  statistics.
+- Transactions: with `adbc.connection.autocommit` = `false` a transaction is
+  open on the quack session (`BEGIN`), `Commit` / `Rollback` end it and begin
+  the next, and turning autocommit back on commits. Every statement on the
+  connection takes part, bulk ingest included. While a transaction is open,
+  `reconnect_on_session_loss` does not re-establish a lost session (the next
+  statement would silently run outside the transaction): the call fails, and
+  `Rollback` starts over on a new session. Python's DB-API turns autocommit
+  off by default, so call `commit()`; after a failed or cancelled statement,
+  DuckDB needs a `rollback()`.
+
+The library also exports `AdbcDriverInit`, the entry point a driver manager
+uses when none is given.
+
+### Substrait plans
+
+A statement takes a [Substrait](https://substrait.io) plan instead of SQL
+(`SubstraitPlan`, `vendor_substrait` = true): the driver writes it as one
+DuckDB query (`src/Quack.Adbc/Substrait/`), and `Prepare` refuses a plan it
+cannot write with DuckDB's exact meaning (`ADBC_STATUS_NOT_IMPLEMENTED`), before
+anything runs; `ExecuteQuery` / `ExecuteSchema` then run it. It is built for
+plans DuckDB itself produces (`to_substrait`; here the producer of the
+[fabricator](https://github.com/cmettler/fabricator-extension) extension, whose
+remote pushdown hands a DuckDB client's queries to a quack server this way): a
+function with no extension URN is taken as a DuckDB function of that name, and
+the producer's own extensions (date functions, `IGNORE NULLS` windows) are read.
+Scans with filters and projections, joins (inner, outer, semi, anti, mark,
+single), aggregates with grouping sets and `FILTER`, window functions, set
+operations, sorts and limits, subqueries; and writes: `INSERT … SELECT`,
+`DELETE` (joins allowed), `UPDATE` of one table and the producer's `MERGE`
+(matched by the target's key), answering the affected-row count
+(`ExecuteUpdate`). Not: `RETURNING`, table functions, or a function of the
+client's own catalog. What a division by zero or a float outside
+its domain returns follows the plan's function options, checked against the
+server's settings (`ieee_floating_point_ops`, `error_on_division_by_zero`); the
+other settings the SQL depends on (`TimeZone`, `default_collation`, …) are the
+client's to compare. The plan decoder derives from the Kusto ADBC driver (MIT,
+see `src/Quack.Adbc/Substrait/THIRD-PARTY-NOTICES.md`).
+
+Not implemented: partitioned results, prepared statements with parameters,
+isolation levels and read-only connections, and error details.
 
 ## Using the native library from Python (or any ADBC C-API consumer)
 
@@ -99,6 +326,13 @@ with adbc_driver_manager.dbapi.connect(
 
 The library is fully self-contained: no .NET runtime, no DuckDB native
 library, no other dependencies at the call site.
+
+Bulk ingest works through the DB-API extension, with every mode:
+
+```python
+with conn.cursor() as cur:
+    cur.adbc_ingest("events", arrow_table_or_reader, mode="create_append")
+```
 
 ## Using the Power BI connector
 
@@ -161,7 +395,66 @@ pwsh scripts/publish-native.ps1 -Runtime linux-arm64
 
 # End-to-end smoke test (spawns duckdb + loads native lib from Python)
 python scripts/smoke_test_python.py
+
+# The ADBC validation suite against the published native library
+pip install -r validation/requirements.txt
+python validation/run.py --duckdb /path/to/duckdb
 ```
+
+[validation/README.md](validation/README.md) has the details of the
+validation suite; `.github/workflows/validation.yml` runs it, with the
+integration and ADBC tests, against a stock DuckDB 2.0.1 CLI.
+
+## Planned: a compact column layer (not done)
+
+Measured on DuckDB 2.0.1, 1M rows, client side only (decoding captured
+responses), per row:
+
+| column | on the wire | wire -> columns | columns -> Arrow |
+|---|---|---|---|
+| VARCHAR, short (`'x' \|\| i`) | 11 B | 24-35 ns, 24 B allocated | 24-55 ns, 11 B |
+| VARCHAR, 32 B (`md5`) | 36 B | 26-35 ns, 24 B | 37-51 ns, 36 B |
+| LIST(BIGINT) `[i, i + 1]` | 25 B | 24-33 ns, 16 B | 3-6 ns, 8 B |
+| BIGINT + 2 VARCHAR + LIST | 72 B | 88-127 ns, 72 B | 67-83 ns, 56 B |
+
+The mixed query takes about 500 ns per row end to end through ADBC, so
+decoding is about a third of it. Most of that is strings:
+
+- `VarBytesColumn` holds a `ReadOnlyMemory<byte>?` per value: 24 bytes to
+  point at a 1-7 byte key or a short string. `ListColumn` holds a
+  `(ulong, ulong)` (16 bytes) per row.
+- `ArrowConverter` copies every string into a new buffer, value by value,
+  although DuckDB sends them contiguous (field 109) and Arrow's string layout
+  is the same bytes plus offsets.
+
+What to do:
+
+1. Read VARCHAR/BLOB vectors into int32 offsets (a prefix sum over DuckDB's
+   length data) plus the contiguous byte data, and LIST entries as 32-bit
+   offset and length.
+2. Build Arrow string, binary and list arrays from those offsets and a slice
+   of the response buffer, without copying the bytes.
+3. Keep `VarBytesColumn.Values` and `ListColumn.Entries` as they are, built on
+   first access from the compact form (as `VariantColumn.Values` is), so the
+   public API does not change.
+4. Measure end to end again; the estimate is about half of the decode time.
+
+Ownership rules this relies on:
+
+- The response is a plain `byte[]` owned by the GC. Columns and Arrow buffers
+  slice it; a batch keeps its response alive, and the C Data Interface export
+  pins it until the consumer releases the batch. The ADBC path already does
+  this for fixed-size columns and validity, so strings add no new kind of
+  sharing.
+- No pooling of response buffers while slices are handed out: a buffer
+  returned to an `ArrayPool` with slices still in use is a use after free.
+  Pooling would need an explicit, reference-counted owner that every column
+  and Arrow buffer retains and releases.
+- A small batch kept by a consumer keeps its whole response (up to 32 MiB)
+  alive. If that matters, copy columns that are a small part of the response.
+- Slices sit at arbitrary byte offsets. Offsets are built in new, aligned
+  arrays; check fixed-size columns, which are sliced today, against a strict
+  consumer (`pyarrow` `validate(full=True)`).
 
 ## Repository layout
 

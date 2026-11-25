@@ -23,6 +23,40 @@ public sealed class LogicalType : IEquatable<LogicalType>
         TypeInfo = typeInfo;
     }
 
+    // VARIANT with its canonical type info: STRUCT(keys VARCHAR[], children
+    // STRUCT(keys_index UINTEGER, values_index UINTEGER)[], values STRUCT(type_id
+    // UTINYINT, byte_offset UINTEGER)[], data BLOB), as LogicalType::VARIANT().
+    public static LogicalType Variant { get; } = new(LogicalTypeId.Variant, new StructTypeInfo
+    {
+        ChildTypes =
+        [
+            new("keys", new LogicalType(LogicalTypeId.List, new ListTypeInfo { ChildType = new LogicalType(LogicalTypeId.Varchar) })),
+            new("children", new LogicalType(LogicalTypeId.List, new ListTypeInfo
+            {
+                ChildType = new LogicalType(LogicalTypeId.Struct, new StructTypeInfo
+                {
+                    ChildTypes =
+                    [
+                        new("keys_index", new LogicalType(LogicalTypeId.UInteger)),
+                        new("values_index", new LogicalType(LogicalTypeId.UInteger)),
+                    ],
+                }),
+            })),
+            new("values", new LogicalType(LogicalTypeId.List, new ListTypeInfo
+            {
+                ChildType = new LogicalType(LogicalTypeId.Struct, new StructTypeInfo
+                {
+                    ChildTypes =
+                    [
+                        new("type_id", new LogicalType(LogicalTypeId.UTinyInt)),
+                        new("byte_offset", new LogicalType(LogicalTypeId.UInteger)),
+                    ],
+                }),
+            })),
+            new("data", new LogicalType(LogicalTypeId.Blob)),
+        ],
+    });
+
     public PhysicalType GetPhysicalType()
     {
         switch (Id)
@@ -49,6 +83,7 @@ public sealed class LogicalType : IEquatable<LogicalType>
             case LogicalTypeId.TimestampMs:
             case LogicalTypeId.TimestampNs:
             case LogicalTypeId.TimestampTz:
+            case LogicalTypeId.TimestampTzNs:
                 return PhysicalType.Int64;
             case LogicalTypeId.Interval: return PhysicalType.Interval;
             case LogicalTypeId.Uuid: return PhysicalType.Int128;
@@ -59,12 +94,17 @@ public sealed class LogicalType : IEquatable<LogicalType>
             case LogicalTypeId.Blob:
             case LogicalTypeId.Bit:
             case LogicalTypeId.Geometry:
+            // DuckDB's own varint encoding, carried as a string_t.
+            case LogicalTypeId.BigNum:
                 return PhysicalType.Varchar;
             case LogicalTypeId.List:
             case LogicalTypeId.Map:
                 return PhysicalType.List;
             case LogicalTypeId.Struct:
+            case LogicalTypeId.Tuple:
             case LogicalTypeId.Union:
+            // VARIANT is a STRUCT(keys, children, values, data) underneath.
+            case LogicalTypeId.Variant:
                 return PhysicalType.Struct;
             case LogicalTypeId.Array:
                 return PhysicalType.Array;
@@ -72,7 +112,8 @@ public sealed class LogicalType : IEquatable<LogicalType>
                 return (TypeInfo as EnumTypeInfo)?.PhysicalType ?? PhysicalType.Invalid;
             case LogicalTypeId.Decimal:
                 return DecimalPhysicalType((TypeInfo as DecimalTypeInfo)?.Width ?? 0);
-            case LogicalTypeId.SqlNull: return PhysicalType.Bool;
+            // DuckDB stores SQLNULL as an INT32 (all rows null).
+            case LogicalTypeId.SqlNull: return PhysicalType.Int32;
             case LogicalTypeId.Pointer: return PhysicalType.UInt64;
             case LogicalTypeId.Validity: return PhysicalType.Bit;
             default:

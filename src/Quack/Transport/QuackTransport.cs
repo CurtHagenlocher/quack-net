@@ -1,6 +1,7 @@
 // Copyright (c) Curt Hagenlocher. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See LICENSE in the project root for license information.
 
+using System.Diagnostics.CodeAnalysis;
 using System.Net.Http.Headers;
 using Quack.Protocol;
 using Quack.Serialization;
@@ -8,25 +9,31 @@ using Quack.Serialization;
 namespace Quack.Transport;
 
 // HTTP transport for the quack protocol. Sends each message as a single
-// `POST /quack` with Content-Type `application/duckdb`. Mirrors the server in
+// `POST /quack` with Content-Type `application/vnd.duckdb`. Mirrors the server in
 // duckdb_quack::QuackHttpServer.
 //
-// Default HttpClient has no timeout. The quack server has no in-protocol
-// cancel/interrupt (see QuackConnection comment), so an HTTP-level timeout
-// can only abort the request locally while leaving the server-side query
-// running on a session the client can no longer safely reuse. Callers who
-// want to bound a query pass a CancellationToken; cancellation marks the
-// transport broken (IsBroken == true) so QuackConnection.DisposeAsync skips
-// its DisconnectMessage attempt and just releases the socket.
+// Default HttpClient has no timeout. An HTTP-level timeout can only abort
+// the request locally while leaving the server-side query running on a
+// session the client can no longer safely reuse (QuackConnection.CancelAsync
+// is the in-protocol way to stop a query). Callers who want to bound a
+// request pass a CancellationToken; cancellation marks the transport broken
+// (IsBroken == true) so QuackConnection.DisposeAsync skips its
+// DisconnectMessage attempt and just releases the socket.
 public sealed class QuackTransport : IDisposable
 {
-    private static readonly MediaTypeHeaderValue QuackMediaType = new("application/duckdb");
+    // What DuckDB's own quack client and server send.
+    private static readonly MediaTypeHeaderValue QuackMediaType = new("application/vnd.duckdb");
 
-    // Exact server-side wording from QuackServer::HandleMessage in
-    // duckdb-quack v1.5-variegata. Match is case-insensitive for forward
+    // Exact server-side wording from QuackServer::DispatchMessage in
+    // duckdb-quack v2.0-cyanoptera: an unknown connection id, and a session
+    // whose heartbeat lease ran out. Match is case-insensitive for forward
     // robustness against minor server rewording (an upstream issue asks
     // for a typed error code; until then string-matching is the contract).
-    private const string SessionExpiredServerMessage = "Invalid connection id";
+    private static readonly string[] SessionExpiredServerMessages =
+    [
+        "Invalid connection id",
+        "Connection heartbeat lease expired",
+    ];
 
     private readonly HttpClient _httpClient;
     private readonly bool _ownsHttpClient;
@@ -41,7 +48,7 @@ public sealed class QuackTransport : IDisposable
     {
         Uri = uri;
         _endpoint = uri.HttpUrl;
-        _httpClient = httpClient ?? CreateDefaultClient();
+        _httpClient = httpClient ?? CreateDefaultClient(uri.SkipCertificateVerification);
         _ownsHttpClient = httpClient is null;
     }
 
@@ -50,7 +57,20 @@ public sealed class QuackTransport : IDisposable
     {
     }
 
-    public async Task<QuackMessage> SendAsync(QuackMessage message, CancellationToken cancellationToken = default)
+    public Task<QuackMessage> SendAsync(QuackMessage message, CancellationToken cancellationToken = default)
+        => SendCoreAsync(message, cancellationToken, markBrokenOnCancel: true);
+
+    // For a side request (CANCEL) that may be abandoned: it runs on its own
+    // pooled HTTP connection, so giving up on it leaves the transport intact.
+    internal async Task<TResponse> SendSideRequestAsync<TResponse>(QuackMessage message, CancellationToken cancellationToken)
+        where TResponse : QuackMessage
+    {
+        QuackMessage response = await SendCoreAsync(message, cancellationToken, markBrokenOnCancel: false).ConfigureAwait(false);
+        return response as TResponse ?? throw new QuackException(
+            $"Expected response of type '{typeof(TResponse).Name}' but server returned '{response.GetType().Name}' (MessageType={response.MessageType}).");
+    }
+
+    private async Task<QuackMessage> SendCoreAsync(QuackMessage message, CancellationToken cancellationToken, bool markBrokenOnCancel)
     {
         ArgumentNullException.ThrowIfNull(message);
         if (IsBroken)
@@ -72,7 +92,7 @@ public sealed class QuackTransport : IDisposable
         }
         catch (OperationCanceledException)
         {
-            MarkBroken();
+            if (markBrokenOnCancel) MarkBroken();
             throw;
         }
         catch (HttpRequestException ex)
@@ -90,7 +110,7 @@ public sealed class QuackTransport : IDisposable
             }
             catch (OperationCanceledException)
             {
-                MarkBroken();
+                if (markBrokenOnCancel) MarkBroken();
                 throw;
             }
 
@@ -98,11 +118,18 @@ public sealed class QuackTransport : IDisposable
             {
                 // Try to surface a server-side ErrorResponse if the body parses
                 // as one; otherwise just report the status.
-                if (responseBytes.Length > 0 && TryParseErrorMessage(responseBytes, out string? errorMessage))
+                if (responseBytes.Length > 0 && TryParseError(responseBytes, out ErrorResponse? errorResponse))
                 {
-                    throw ToTypedError(message.ConnectionId, errorMessage);
+                    if (errorResponse.MustInvalidate)
+                    {
+                        Volatile.Write(ref _broken, 1);
+                    }
+                    throw ToTypedError(message.ConnectionId, errorResponse);
                 }
-                throw new QuackException($"HTTP {(int)response.StatusCode} ({response.StatusCode}) from quack server at {_endpoint}.");
+                throw new QuackException($"HTTP {(int)response.StatusCode} ({response.StatusCode}) from quack server at {_endpoint}.")
+                {
+                    HttpStatusCode = (int)response.StatusCode,
+                };
             }
 
             QuackMessage parsed;
@@ -117,7 +144,13 @@ public sealed class QuackTransport : IDisposable
 
             if (parsed is ErrorResponse error)
             {
-                throw ToTypedError(message.ConnectionId, error.Message);
+                // The server's own database died with this error: nothing on
+                // this connection can succeed any more.
+                if (error.MustInvalidate)
+                {
+                    Volatile.Write(ref _broken, 1);
+                }
+                throw ToTypedError(message.ConnectionId, error);
             }
             return parsed;
         }
@@ -128,10 +161,26 @@ public sealed class QuackTransport : IDisposable
     // healthy — only the server-side session is gone — so we keep
     // IsBroken untouched and let QuackConnection decide whether to
     // re-handshake.
-    private static QuackException ToTypedError(string requestConnectionId, string serverMessage)
-        => serverMessage.Contains(SessionExpiredServerMessage, StringComparison.OrdinalIgnoreCase)
+    private static QuackException ToTypedError(string requestConnectionId, ErrorResponse error)
+    {
+        string serverMessage = error.Message;
+        bool expired = SessionExpiredServerMessages.Any(m => serverMessage.Contains(m, StringComparison.OrdinalIgnoreCase));
+        return expired
             ? new QuackSessionExpiredException(requestConnectionId, serverMessage)
-            : new QuackException(serverMessage);
+            {
+                ServerExceptionType = NullIfEmpty(error.ExceptionType),
+                ServerExtraInfo = error.ExtraInfo,
+                ServerMustInvalidate = error.MustInvalidate,
+            }
+            : new QuackException(serverMessage)
+            {
+                ServerExceptionType = NullIfEmpty(error.ExceptionType),
+                ServerExtraInfo = error.ExtraInfo,
+                ServerMustInvalidate = error.MustInvalidate,
+            };
+    }
+
+    private static string? NullIfEmpty(string value) => value.Length == 0 ? null : value;
 
     public async Task<TResponse> SendAsync<TResponse>(QuackMessage message, CancellationToken cancellationToken = default)
         where TResponse : QuackMessage
@@ -155,14 +204,13 @@ public sealed class QuackTransport : IDisposable
 
     private void MarkBroken() => Interlocked.Exchange(ref _broken, 1);
 
-    private static bool TryParseErrorMessage(ReadOnlyMemory<byte> bytes, out string message)
+    private static bool TryParseError(ReadOnlyMemory<byte> bytes, [NotNullWhen(true)] out ErrorResponse? error)
     {
         try
         {
-            QuackMessage parsed = QuackMessage.Deserialize(bytes);
-            if (parsed is ErrorResponse error)
+            if (QuackMessage.Deserialize(bytes) is ErrorResponse parsed)
             {
-                message = error.Message;
+                error = parsed;
                 return true;
             }
         }
@@ -170,23 +218,27 @@ public sealed class QuackTransport : IDisposable
         {
             // Fall through; we'll return a status-based message instead.
         }
-        message = string.Empty;
+        error = null;
         return false;
     }
 
-    private static HttpClient CreateDefaultClient()
+    private static HttpClient CreateDefaultClient(bool skipCertificateVerification)
     {
         SocketsHttpHandler handler = new()
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(10),
             PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
         };
-        // No HttpClient.Timeout: the quack protocol has no cancel/interrupt
-        // message, so a fired HttpClient.Timeout aborts the request locally
-        // and leaves the server-side query running on a session the client
-        // can't safely reuse. Callers wanting a query timeout pass a
-        // CancellationToken instead; QuackConnection treats cancellation as
-        // a terminal event for the connection.
+        if (skipCertificateVerification)
+        {
+            // tls=skip_verify: encrypted, but any certificate is accepted.
+            handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
+        }
+        // No HttpClient.Timeout: a fired HttpClient.Timeout aborts the
+        // request locally and leaves the server-side query running on a
+        // session the client can't safely reuse. Callers wanting a query
+        // timeout pass a CancellationToken (terminal for the connection) or
+        // call QuackConnection.CancelAsync.
         return new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
     }
 }

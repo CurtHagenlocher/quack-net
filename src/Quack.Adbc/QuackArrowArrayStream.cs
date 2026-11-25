@@ -16,13 +16,19 @@ internal sealed class QuackArrowArrayStream : IArrowArrayStream
 {
     private readonly QuackQueryResult _result;
     private readonly Schema _schema;
+    // The statement's operation: a StatementCancel or ConnectionCancel stops the reads.
+    private readonly QuackOperation? _operation;
+    private readonly bool _lossless;
+    private CancellationTokenSource? _linked;
     private IAsyncEnumerator<DuckDbChunk>? _enumerator;
     private bool _disposed;
 
-    public QuackArrowArrayStream(QuackQueryResult result)
+    public QuackArrowArrayStream(QuackQueryResult result, QuackOperation? operation = null, bool lossless = false)
     {
         _result = result;
-        _schema = ArrowConverter.BuildSchema(result.ColumnNames, result.ColumnTypes);
+        _operation = operation;
+        _lossless = lossless;
+        _schema = ArrowConverter.BuildSchema(result.ColumnNames, result.ColumnTypes, lossless);
     }
 
     public Schema Schema => _schema;
@@ -33,14 +39,44 @@ internal sealed class QuackArrowArrayStream : IArrowArrayStream
         {
             throw new ObjectDisposedException(nameof(QuackArrowArrayStream));
         }
-        _enumerator ??= _result.GetChunksAsync(cancellationToken).GetAsyncEnumerator(cancellationToken);
-
-        if (!await _enumerator.MoveNextAsync().ConfigureAwait(false))
+        if (_enumerator is null)
         {
-            return null;
+            CancellationToken token = cancellationToken;
+            if (_operation is not null)
+            {
+                _linked = CancellationTokenSource.CreateLinkedTokenSource(_operation.Token, cancellationToken);
+                token = _linked.Token;
+            }
+            _enumerator = _result.GetChunksAsync(token).GetAsyncEnumerator(token);
+        }
+
+        try
+        {
+            if (!await _enumerator.MoveNextAsync().ConfigureAwait(false))
+            {
+                // The result is complete: the operation has nothing left to cancel.
+                _operation?.Dispose();
+                return null;
+            }
+        }
+        catch (OperationCanceledException) when (_operation is { WasCancelled: true })
+        {
+            throw _operation.Translate("Reading the result");
+        }
+        catch (QuackException e)
+        {
+            throw QuackAdbcException.From(e);
         }
         DuckDbChunk chunk = _enumerator.Current;
-        return ArrowConverter.ToRecordBatch(_schema, chunk);
+        try
+        {
+            return ArrowConverter.ToRecordBatch(_schema, chunk, _lossless);
+        }
+        catch (NotSupportedException e)
+        {
+            await _result.CloseAsync().ConfigureAwait(false);
+            throw new Apache.Arrow.Adbc.AdbcException(e.Message, Apache.Arrow.Adbc.AdbcStatusCode.NotImplemented);
+        }
     }
 
     public void Dispose()
@@ -55,5 +91,9 @@ internal sealed class QuackArrowArrayStream : IArrowArrayStream
             _enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult();
             _enumerator = null;
         }
+        // A result not read to its end is cancelled on the server.
+        _result.CloseAsync().GetAwaiter().GetResult();
+        _linked?.Dispose();
+        _operation?.Dispose();
     }
 }

@@ -14,4 +14,18 @@ public class QuackException : Exception
         : base(message, innerException)
     {
     }
+
+    // The DuckDB exception type the server raised ("Catalog", "Binder", ...),
+    // when the error came from an ErrorResponse that carried one.
+    public string? ServerExceptionType { get; init; }
+
+    // ErrorData extra info sent with the server's error.
+    public IReadOnlyDictionary<string, string>? ServerExtraInfo { get; init; }
+
+    // The server's own database was invalidated by this error.
+    public bool ServerMustInvalidate { get; init; }
+
+    // The HTTP status, when the server answered with a non-success status and
+    // no ErrorResponse.
+    public int? HttpStatusCode { get; init; }
 }

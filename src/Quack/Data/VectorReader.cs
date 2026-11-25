@@ -1,6 +1,7 @@
 // Copyright (c) Curt Hagenlocher. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See LICENSE in the project root for license information.
 
+using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using Quack.Serialization;
 using Quack.Types;
@@ -9,14 +10,17 @@ namespace Quack.Data;
 
 // Port of duckdb::Vector::Deserialize for the read path.
 //
-// Wire layout (with SerializationCompatibility v7):
+// Wire layout (StorageVersion V2_0_0, as quack serializes for DuckDB 2.0):
 //   field 90  vector_type            (uint8 LEB128; default FLAT)
 //   field 91  sel_vector or seq_start (raw / signed LEB128, depending on vector_type)
 //   field 92  dict_count or seq_increment
 //   field 99  geometry_format        (GEOMETRY only)
 //   field 100 has_validity_mask      (bool)
 //   field 101 validity               (raw bytes)
-//   field 102 data                   (constant-size: raw bytes; VARCHAR/GEOM: list<string>)
+//   field 102 data                   (constant-size: raw bytes; GEOMETRY and pre-2.0 VARCHAR: list<string>)
+//   field 107 byte_data_length       (VARCHAR/BLOB/BIT, 2.0+)
+//   field 108 length_data            (VARCHAR/BLOB/BIT, 2.0+: uint32 per row)
+//   field 109 byte_data              (VARCHAR/BLOB/BIT, 2.0+: concatenated bytes)
 //   field 103 children (STRUCT) or array_size (ARRAY)
 //   field 104 list_size (LIST) or child (ARRAY)
 //   field 105 entries (LIST, list<{offset, length}>)
@@ -41,12 +45,36 @@ internal static class VectorReader
                 return ReadSequence(reader, type, count);
             case VectorType.Dictionary:
                 return ReadDictionary(reader, type, count);
+            case VectorType.Shredded:
+                return ReadShredded(reader, type, count);
             case VectorType.Fsst:
                 throw new SerializationException(
                     $"VectorType.{vectorType} is not yet supported by the MVP client.");
             default:
                 throw new SerializationException($"Unknown VectorType value {(int)vectorType}.");
         }
+    }
+
+    // Shredded VARIANT vector (ShreddedVectorBuffer::TrySerialize):
+    //   field 91  shredded_type  -- LogicalType STRUCT(unshredded, shredded)
+    //   field 92  shredded_data  -- object: a vector of that type
+    private static DuckDbColumn ReadShredded(BinaryDeserializer reader, LogicalType type, int count)
+    {
+        if (type.Id != LogicalTypeId.Variant)
+        {
+            throw new SerializationException($"A shredded vector must be a VARIANT, found '{type}'.");
+        }
+        reader.BeginProperty(fieldId: 91);
+        LogicalType shreddedType = LogicalType.Deserialize(reader);
+        reader.BeginProperty(fieldId: 92);
+        reader.BeginObject();
+        DuckDbColumn data = Read(reader, shreddedType, count);
+        reader.EndObject();
+        if (data is not StructColumn shredded)
+        {
+            throw new SerializationException("Shredded VARIANT data must be a STRUCT.");
+        }
+        return VariantDecoder.FromShredded(shredded, type);
     }
 
     // Dictionary vector wire layout (Vector::Serialize, DICTIONARY_VECTOR branch):
@@ -129,8 +157,11 @@ internal static class VectorReader
                 };
             }
             default:
-                throw new SerializationException(
-                    $"Dictionary expansion is not yet supported for column kind '{dictionary.GetType().Name}'.");
+            {
+                int[] rows = new int[count];
+                for (int i = 0; i < count; i++) rows[i] = (int)sel[i];
+                return ColumnGather.Take(dictionary, rows);
+            }
         }
     }
 
@@ -212,6 +243,8 @@ internal static class VectorReader
         {
             case PhysicalType.Varchar:
                 return ReadVarcharColumn(reader, type, count, validity);
+            case PhysicalType.Struct when type.Id == LogicalTypeId.Variant:
+                return VariantDecoder.FromUnshredded(ReadStructColumn(reader, type, count, validity), type);
             case PhysicalType.Struct:
                 return ReadStructColumn(reader, type, count, validity);
             case PhysicalType.List:
@@ -229,6 +262,17 @@ internal static class VectorReader
 
     private static VarBytesColumn ReadVarcharColumn(BinaryDeserializer reader, LogicalType type, int count, ValidityMask validity)
     {
+        // DuckDB 2.0 (StorageVersion V2_0_0) writes strings as two blobs:
+        //   field 107 byte_data_length -- optional_idx (uint64 LEB128)
+        //   field 108 length_data      -- uint32 LE length per row (0 for NULL rows)
+        //   field 109 byte_data        -- the non-NULL strings back to back
+        // Older peers use the list form at field 102, handled below.
+        if (reader.NextFieldIs(fieldId: 107))
+        {
+            reader.BeginProperty(fieldId: 107);
+            return ReadVarcharBlobs(reader, type, count, validity);
+        }
+
         reader.BeginProperty(fieldId: 102);
         ulong listCount = reader.BeginList();
         if (listCount != (ulong)count)
@@ -248,6 +292,53 @@ internal static class VectorReader
         reader.EndList();
         return new VarBytesColumn { Type = type, Count = count, Validity = validity, Values = values };
     }
+
+    private static VarBytesColumn ReadVarcharBlobs(BinaryDeserializer reader, LogicalType type, int count, ValidityMask validity)
+    {
+        ulong byteDataLength = reader.ReadUInt64();
+        if (byteDataLength == MessageHeaderOptionalIdxInvalid)
+        {
+            throw new SerializationException("VARCHAR vector has an unset byte_data_length (field 107).");
+        }
+
+        reader.BeginProperty(fieldId: 108);
+        ReadOnlyMemory<byte> lengthData = reader.ReadDataMemory();
+        int expectedLengthBytes = sizeof(uint) * count;
+        if (lengthData.Length != expectedLengthBytes)
+        {
+            throw new SerializationException(
+                $"VARCHAR length_data is {lengthData.Length} bytes; expected {expectedLengthBytes} ({sizeof(uint)} per row * {count} rows).");
+        }
+
+        reader.BeginProperty(fieldId: 109);
+        ReadOnlyMemory<byte> byteData = reader.ReadDataMemory();
+        if ((ulong)byteData.Length != byteDataLength)
+        {
+            throw new SerializationException(
+                $"VARCHAR byte_data is {byteData.Length} bytes; byte_data_length says {byteDataLength}.");
+        }
+
+        ReadOnlyMemory<byte>?[] values = new ReadOnlyMemory<byte>?[count];
+        ReadOnlySpan<byte> lengths = lengthData.Span;
+        int offset = 0;
+        for (int i = 0; i < count; i++)
+        {
+            if (!validity.IsValid(i))
+            {
+                continue;
+            }
+            uint length = BinaryPrimitives.ReadUInt32LittleEndian(lengths.Slice(i * sizeof(uint), sizeof(uint)));
+            if (length > (uint)(byteData.Length - offset))
+            {
+                throw new SerializationException("VARCHAR string lengths exceed the serialized string data.");
+            }
+            values[i] = byteData.Slice(offset, (int)length);
+            offset += (int)length;
+        }
+        return new VarBytesColumn { Type = type, Count = count, Validity = validity, Values = values };
+    }
+
+    private const ulong MessageHeaderOptionalIdxInvalid = ulong.MaxValue;
 
     private static StructColumn ReadStructColumn(BinaryDeserializer reader, LogicalType type, int count, ValidityMask validity)
     {
@@ -408,8 +499,8 @@ internal static class VectorReader
                 : BroadcastValidity(bytesCol.Validity, count);
             return new VarBytesColumn { Type = singleton.Type, Count = count, Validity = expandedValidity, Values = expanded };
         }
-        throw new SerializationException(
-            $"ConstantVector broadcast not supported for column kind '{singleton.GetType().Name}'.");
+        // Nested kinds (STRUCT, LIST, ARRAY, VARIANT): repeat row 0.
+        return ColumnGather.Take(singleton, new int[count]);
     }
 
     private static ValidityMask BroadcastValidity(ValidityMask source, int count)

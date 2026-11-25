@@ -32,9 +32,7 @@ internal static class GetObjectsBuilder
 
         // Run the query through quack-net directly; bypassing the ADBC layer
         // here avoids reentrant Arrow conversion of system-catalog rows.
-        QuackQueryResult result = connection.Underlying.ExecuteAsync(sql)
-            .GetAwaiter().GetResult();
-        IReadOnlyList<Data.DuckDbChunk> chunks = result.ToListAsync().GetAwaiter().GetResult();
+        IReadOnlyList<Data.DuckDbChunk> chunks = connection.RunQuery(sql, out _, "GetObjects");
 
         Catalog[] catalogs = WalkChunks(chunks, depth);
 
@@ -83,7 +81,9 @@ internal static class GetObjectsBuilder
         if (needSchemas) sb.Append("\nLEFT JOIN duckdb_schemas() s ON s.database_name = d.database_name");
         if (needTables) sb.Append("\nLEFT JOIN tv ON tv.database_name = s.database_name AND tv.schema_name = s.schema_name");
         if (needColumns) sb.Append("\nLEFT JOIN duckdb_columns() c ON c.database_name = tv.database_name AND c.schema_name = tv.schema_name AND c.table_name = tv.table_name");
-        sb.Append("\nWHERE NOT d.internal");
+        // DuckDB's temp catalog is internal, but holds the session's temporary
+        // tables: list it when it has any.
+        sb.Append("\nWHERE (NOT d.internal OR (d.database_name = 'temp' AND EXISTS (SELECT 1 FROM tv WHERE tv.database_name = 'temp')))");
         if (catalogPattern is not null) sb.Append($"\n  AND d.database_name LIKE {Quote(catalogPattern)}");
         if (needSchemas && dbSchemaPattern is not null) sb.Append($"\n  AND (s.schema_name IS NULL OR s.schema_name LIKE {Quote(dbSchemaPattern)})");
         if (needTables && tableNamePattern is not null) sb.Append($"\n  AND (tv.table_name IS NULL OR tv.table_name LIKE {Quote(tableNamePattern)})");

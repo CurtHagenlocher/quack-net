@@ -4,7 +4,7 @@
 namespace Quack.Types;
 
 // Mirror of duckdb::PhysicalType
-// (src/include/duckdb/common/types.hpp in duckdb/duckdb v1.5.x).
+// (src/include/duckdb/common/types.hpp in duckdb/duckdb v2.0.x).
 public enum PhysicalType : byte
 {
     Bool = 1,

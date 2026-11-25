@@ -1,6 +1,7 @@
 // Copyright (c) Curt Hagenlocher. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See LICENSE in the project root for license information.
 
+using System.Buffers.Binary;
 using Quack.Serialization;
 using Quack.Types;
 
@@ -12,7 +13,19 @@ namespace Quack.Data;
 internal static class VectorWriter
 {
     public static void Write(BinarySerializer s, DuckDbColumn column, int count)
+        => Write(s, column, count, ValidityMask.AllValid);
+
+    // `parentValidity` is the validity of the enclosing STRUCT rows. DuckDB
+    // requires the children of a NULL struct row to be NULL as well (a field
+    // read goes to the child vector directly), while Arrow and hand-built
+    // columns may leave them valid, so the effective mask is child AND parent.
+    private static void Write(BinarySerializer s, DuckDbColumn column, int count, ValidityMask parentValidity)
     {
+        if (column is VariantColumn variant)
+        {
+            // A VARIANT travels in its canonical STRUCT layout.
+            column = VariantEncoder.ToStruct(variant);
+        }
         if (column.Count != count)
         {
             throw new ArgumentException(
@@ -28,18 +41,18 @@ internal static class VectorWriter
             s.WriteProperty(fieldId: 99, (byte)GeometryStorageType.Wkb);
         }
 
-        bool hasValidity = !column.Validity.IsAllValid;
+        if (!column.Validity.IsAllValid && column.Validity.Bytes.Length != ValidityMask.RequiredByteCount(count))
+        {
+            throw new SerializationException(
+                $"Validity mask is {column.Validity.Bytes.Length} bytes; expected {ValidityMask.RequiredByteCount(count)} for {count} rows.");
+        }
+        ValidityMask validity = Combine(column.Validity, parentValidity, count);
+        bool hasValidity = !validity.IsAllValid;
         s.WriteProperty(fieldId: 100, hasValidity);
         if (hasValidity)
         {
-            int expected = ValidityMask.RequiredByteCount(count);
-            if (column.Validity.Bytes.Length != expected)
-            {
-                throw new SerializationException(
-                    $"Validity mask is {column.Validity.Bytes.Length} bytes; expected {expected} for {count} rows.");
-            }
             s.WriteFieldId(101);
-            s.WriteBlob(column.Validity.Bytes.Span);
+            s.WriteBlob(validity.Bytes.Span);
         }
 
         switch (column)
@@ -48,10 +61,10 @@ internal static class VectorWriter
                 WriteFixedSizeColumn(s, fixedCol, count);
                 break;
             case VarBytesColumn bytesCol:
-                WriteVarBytesColumn(s, bytesCol, count);
+                WriteVarBytesColumn(s, bytesCol, count, validity);
                 break;
             case StructColumn structCol:
-                WriteStructColumn(s, structCol, count);
+                WriteStructColumn(s, structCol, count, validity);
                 break;
             case ListColumn listCol:
                 WriteListColumn(s, listCol, count);
@@ -77,13 +90,39 @@ internal static class VectorWriter
         s.WriteBlob(col.Data.Span);
     }
 
-    private static void WriteVarBytesColumn(BinarySerializer s, VarBytesColumn col, int count)
+    private static ValidityMask Combine(ValidityMask own, ValidityMask parent, int count)
+    {
+        if (parent.IsAllValid)
+        {
+            return own;
+        }
+        if (own.IsAllValid)
+        {
+            return parent;
+        }
+        byte[] bytes = new byte[ValidityMask.RequiredByteCount(count)];
+        ReadOnlySpan<byte> a = own.Bytes.Span;
+        ReadOnlySpan<byte> b = parent.Bytes.Span;
+        for (int i = 0; i < bytes.Length; i++)
+        {
+            bytes[i] = (byte)(a[i] & b[i]);
+        }
+        return new ValidityMask(bytes);
+    }
+
+    private static void WriteVarBytesColumn(BinarySerializer s, VarBytesColumn col, int count, ValidityMask validity)
     {
         if (col.Values.Length != count)
         {
             throw new SerializationException(
                 $"VarBytesColumn has {col.Values.Length} values; expected {count}.");
         }
+        if (col.Type.Id != LogicalTypeId.Geometry)
+        {
+            WriteVarBytesBlobs(s, col, count, validity);
+            return;
+        }
+        // GEOMETRY keeps the list form in DuckDB 2.0 (field 102, list<WKB>).
         s.WriteFieldId(102);
         s.BeginList((ulong)count);
         for (int i = 0; i < count; i++)
@@ -97,14 +136,48 @@ internal static class VectorWriter
         s.EndList();
     }
 
-    private static void WriteStructColumn(BinarySerializer s, StructColumn col, int count)
+    // DuckDB 2.0 string layout (StorageVersion V2_0_0): field 107 total byte
+    // count, field 108 one uint32 length per row (0 for NULL rows), field 109
+    // the non-NULL payloads back to back.
+    // A NULL row (by the effective mask) must contribute no bytes: DuckDB skips
+    // NULL rows when it walks byte_data.
+    private static void WriteVarBytesBlobs(BinarySerializer s, VarBytesColumn col, int count, ValidityMask validity)
+    {
+        byte[] lengths = new byte[sizeof(uint) * count];
+        long total = 0;
+        for (int i = 0; i < count; i++)
+        {
+            int length = validity.IsValid(i) ? col.Values[i].GetValueOrDefault().Length : 0;
+            BinaryPrimitives.WriteUInt32LittleEndian(lengths.AsSpan(i * sizeof(uint), sizeof(uint)), (uint)length);
+            total += length;
+        }
+        byte[] bytes = new byte[checked((int)total)];
+        int offset = 0;
+        for (int i = 0; i < count; i++)
+        {
+            if (!validity.IsValid(i))
+            {
+                continue;
+            }
+            ReadOnlySpan<byte> payload = col.Values[i].GetValueOrDefault().Span;
+            payload.CopyTo(bytes.AsSpan(offset));
+            offset += payload.Length;
+        }
+        s.WriteProperty(fieldId: 107, (ulong)total);
+        s.WriteFieldId(108);
+        s.WriteBlob(lengths);
+        s.WriteFieldId(109);
+        s.WriteBlob(bytes);
+    }
+
+    private static void WriteStructColumn(BinarySerializer s, StructColumn col, int count, ValidityMask validity)
     {
         s.WriteFieldId(103);
         s.BeginList((ulong)col.Fields.Length);
         foreach (DuckDbColumn child in col.Fields)
         {
             s.BeginObject();
-            Write(s, child, count);
+            Write(s, child, count, validity);
             s.EndObject();
         }
         s.EndList();
