@@ -76,6 +76,41 @@ public class SubstraitTests : IClassFixture<QuackServerFixture>
         "eHRlbnNpb246aW8uc3Vic3RyYWl0OmZ1bmN0aW9uc19jb21wYXJpc29uQisIAhInZXh0ZW5zaW9uOmlvLnN1YnN0cmFpdDpmdW5j" +
         "dGlvbnNfc3RyaW5nQi8IAxIrZXh0ZW5zaW9uOmlvLnN1YnN0cmFpdDpmdW5jdGlvbnNfYXJpdGhtZXRpYw==";
 
+    // SELECT t.id, x.one, x.y FROM ed_t t LEFT JOIN (SELECT id, 1 AS one, coalesce(i, 0) AS y FROM ed_u) x ON t.id = x.id
+    // (ORDER BY t.id LIMIT 100): a constant on the side the join pads with NULL
+    private static readonly string LeftJoinPlan =
+        "EhQaEhABGgxjb2FsZXNjZTphbnkgARIVGhMQAhoNZXF1YWw6YW55X2FueSABGoMEEoAECvEDGu4DEt8DKtwDEssDOsgDCgcSBQoD" +
+        "AAIDErIDOq8DCggSBgoEBAUGBxL0AjLxAhLHAQrEARKrAQoCaWQKAWkKAWoKAWIKAnRpCgJzaQoBZAoCZDEKAWYKAXMKAXYKAWMK" +
+        "BGZsYWcKAmR0CgJ0cwoBZxJwCgQqAhABCgQqAhABCgQqAhABCgQ6AhABCgQaAhABCgQaAhABCgnCAQYIAhAKIAEKCcIBBggBEAEg" +
+        "AQoEWgIQAQoEYgIQAQoEYgIQAQoEYgIQAQoECgIQAQoFggECEAEKB4oCBAgGGAEKBCoCEAEYAiIGCgIKABABOgwKBG1haW4KBGVk" +
+        "X3QafTp7CgcSBQoDAAIDEj4KPBIgCgJpZAoBaQoBcxIUCgQqAhABCgQqAhABCgRiAhABGAIiCgoGCgAKAggBEAE6DAoEbWFpbgoE" +
+        "ZWRfdRoECgIoARoqGigIARoEKgIQASIMGgoSCAoEEgIIASIAIhAaDloMCgQqAhABEgQKAigAIiQaIggCGgQKAhABIgoaCBIGCgIS" +
+        "ACIAIgwaChIICgQSAggBIgAwAxoIEgYKAhIAIgAaChIICgQSAggBIgAaChIICgQSAggCIgAaChIICgQSAggDIgAaCBIGCgISACIA" +
+        "GgwKCBIGCgISACIAEAIqBAoCOAAyBAoCOGQSAmMwEgJjMRICYzIyChBmKgZEdWNrREJCLwgBEitleHRlbnNpb246aW8uc3Vic3Ry" +
+        "YWl0OmZ1bmN0aW9uc19jb21wYXJpc29u";
+
+    // MERGE INTO ed_u t USING (SELECT id, s FROM ed_t) src ON t.id = src.id
+    //   WHEN MATCHED THEN UPDATE SET s = src.s WHEN NOT MATCHED THEN INSERT (id, s) VALUES (src.id, src.s)
+    private static readonly string MergePlan =
+        "EhUaExABGg1lcXVhbDphbnlfYW55IAESFxoVEAIaD2lzX25vdF9udWxsOmFueSABEhAaDhADGghhbmQ6Ym9vbCACEhMaERAEGgtp" +
+        "c19udWxsOmFueSABGt8IEtwICtkImgHVCAoMCgRtYWluCgRlZF91Gh4KBGs6aWQKAnRwCgJvcAoDdTpzCgRpOmlkCgNpOnMqjAg6" +
+        "iQgKChIICgYDBgcIAAESmQUSlgUSywM6yAMKCxIJCgcHCAkKCwwNEuYCMuMCEuABOt0BCgcSBQoDAAECEssBCsgBEqsBCgJpZAoB" +
+        "aQoBagoBYgoCdGkKAnNpCgFkCgJkMQoBZgoBcwoBdgoBYwoEZmxhZwoCZHQKAnRzCgFnEnAKBCoCEAEKBCoCEAEKBCoCEAEKBDoC" +
+        "EAEKBBoCEAEKBBoCEAEKCcIBBggCEAogAQoJwgEGCAEQASABCgRaAhABCgRiAhABCgRiAhABCgRiAhABCgQKAhABCgWCAQIQAQoH" +
+        "igIECAYYAQoEKgIQARgCIgoKBgoACgIICRABOgwKBG1haW4KBGVkX3QaBAoCKAEaVjpUCggSBgoEAAECAxJCCkASIAoCaWQKAWkK" +
+        "AXMSFAoEKgIQAQoEKgIQAQoEYgIQARgCIg4KCgoACgIIAQoCCAIQAToMCgRtYWluCgRlZF91GgQKAigBIiQaIggBGgQKAhABIgoa" +
+        "CBIGCgISACIAIgwaChIICgQSAggDIgAwAxoIEgYKAhIAIgAaChIICgQSAggBIgAaChIICgQSAggCIgAaChIICgQSAggDIgAaChII" +
+        "CgQSAggEIgAaChIICgQSAggFIgAaChIICgQSAggGIgAaxQEawgEIAhoECgIQASK3ARq0ATKxAQpeCkIaQAgDGgQKAhABIhoaGBoW" +
+        "CAIaBAoCEAEiDBoKEggKBBICCAYiACIaGhgaFggCGgQKAhABIgwaChIICgQSAggCIgASGFoWCgQqAhABEg5aDAoEKgIQARIECgIo" +
+        "AQo0ChgaFggEGgQKAhABIgwaChIICgQSAggGIgASGFoWCgQqAhABEg5aDAoEKgIQARIECgIoAxIZWhcKBCoCEAESD1oNCgQqAhAB" +
+        "EgUKA+oBABq0ATKxAQpeCkIaQAgDGgQKAhABIhoaGBoWCAIaBAoCEAEiDBoKEggKBBICCAYiACIaGhgaFggCGgQKAhABIgwaChII" +
+        "CgQSAggCIgASGFoWCgQqAhABEg5aDAoEKgIQARIECgIoAQo0ChgaFggEGgQKAhABIgwaChIICgQSAggGIgASGFoWCgQqAhABEg5a" +
+        "DAoEKgIQARIECgIoAxIZWhcKBCoCEAESD1oNCgQqAhABEgUKA+oBABqnATKkAQpaCkIaQAgDGgQKAhABIhoaGBoWCAIaBAoCEAEi" +
+        "DBoKEggKBBICCAYiACIaGhgaFggCGgQKAhABIgwaChIICgQSAggCIgASFFoSCgRiAhABEgoSCAoEEgIIASIACjAKGBoWCAQaBAoC" +
+        "EAEiDBoKEggKBBICCAYiABIUWhIKBGICEAESChIICgQSAggFIgASFFoSCgRiAhABEgoSCAoEEgIIBSIAMAFKFBISChBmYWJyaWNh" +
+        "dG9yLm1lcmdlMgoQZioGRHVja0RCQi8IARIrZXh0ZW5zaW9uOmlvLnN1YnN0cmFpdDpmdW5jdGlvbnNfY29tcGFyaXNvbkIsCAIS" +
+        "KGV4dGVuc2lvbjppby5zdWJzdHJhaXQ6ZnVuY3Rpb25zX2Jvb2xlYW4=";
+
     private readonly QuackServerFixture _server;
 
     public SubstraitTests(QuackServerFixture server) => _server = server;
@@ -114,6 +149,32 @@ public class SubstraitTests : IClassFixture<QuackServerFixture>
         Assert.Equal(2, viaPlan);
         Assert.Equal(viaSql, viaPlan);
         Assert.Equal(expected, await Rows(conn, sql: "SELECT id, i, g, s FROM ed_t"));
+    }
+
+    [Fact]
+    public async Task LeftJoin_PadsComputedColumnsWithNull()
+    {
+        using AdbcConnection conn = Open();
+        Execute(conn, Tables);
+        List<string> rows = await Rows(conn, plan: LeftJoinPlan);
+        Assert.Equal(
+            await Rows(conn, sql: "SELECT t.id, x.one, x.y FROM ed_t t LEFT JOIN (SELECT id, 1 AS one, coalesce(i, 0) AS y FROM ed_u) x ON t.id = x.id"),
+            rows);
+        Assert.Contains("6|NULL|NULL", rows);
+    }
+
+    [Fact]
+    public async Task Merge_ChangesWhatTheSqlChanges()
+    {
+        using AdbcConnection conn = Open();
+        Execute(conn, Tables);
+        long viaSql = Update(conn, sql: "MERGE INTO ed_u t USING (SELECT id, s FROM ed_t) src ON t.id = src.id "
+            + "WHEN MATCHED THEN UPDATE SET s = src.s WHEN NOT MATCHED THEN INSERT (id, s) VALUES (src.id, src.s)");
+        List<string> expected = await Rows(conn, sql: "SELECT id, i, s FROM ed_u");
+        Execute(conn, Tables);
+        long viaPlan = Update(conn, plan: MergePlan);
+        Assert.Equal(viaSql, viaPlan);
+        Assert.Equal(expected, await Rows(conn, sql: "SELECT id, i, s FROM ed_u"));
     }
 
     [Fact]

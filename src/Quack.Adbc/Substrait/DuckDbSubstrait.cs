@@ -211,15 +211,18 @@ internal sealed class DuckDbEmitter
     /// A WriteRel, as the fabricator producer writes them: INSERT with the query that gives the rows (in the order of
     /// the written columns); DELETE with the query over the target that selects its rows; UPDATE with the query over
     /// the target that gives the new values, in the order of the assigned columns. The statement answers DuckDB's
-    /// affected-row count. Refused: RETURNING, MERGE (an enhancement), rows moved by a DELETE inside an INSERT, a
-    /// DELETE whose target is not read exactly once at the top of its query, an UPDATE joined with another table.
+    /// affected-row count; and the producer's MERGE (enhancement <c>fabricator.merge</c>, <see cref="EmitMerge"/>).
+    /// Refused: RETURNING, rows moved by a DELETE inside an INSERT, a DELETE whose target is not read exactly once at
+    /// the top of its query, an UPDATE joined with another table.
     /// </summary>
     private string EmitWrite(WriteRel write)
     {
         if (write.Output == F.WriteOutput_ModifiedRecords || write.Emit != null)
             throw SubstraitTranslationException.Unsupported("a write returning its rows (RETURNING)");
+        if (write.Enhancement == F.Enhancement_FabricatorMerge)
+            return EmitMerge(write);
         if (write.Enhancement != null)
-            throw SubstraitTranslationException.Unsupported($"a write with the enhancement {write.Enhancement} (MERGE)");
+            throw SubstraitTranslationException.Unsupported($"a write with the enhancement {write.Enhancement}");
         if (write.Input is WriteRel)
             throw SubstraitTranslationException.Unsupported("rows moved by a DELETE inside an INSERT");
         if (write.TableNames.Count == 0)
@@ -266,6 +269,65 @@ internal sealed class DuckDbEmitter
             default:
                 throw SubstraitTranslationException.Unsupported($"WriteRel operation {write.Op}");
         }
+    }
+
+    /// <summary>
+    /// The producer's MERGE: its input is ONE query that already made the client's whole decision, a row per target /
+    /// source pair with the target's key (<c>k:&lt;column&gt;</c>), <c>tp</c> (1 when a target row takes part), <c>op</c>
+    /// (1 UPDATE, 2 DELETE, 3 INSERT), the new values (<c>u:&lt;column&gt;</c>) and the inserted ones
+    /// (<c>i:&lt;column&gt;</c>). Written as a MERGE INTO that matches by the key (NULL keys match NULL ones). With
+    /// <c>check_duplicates</c> a target row that two source rows would change fails, as in the client.
+    /// </summary>
+    private string EmitMerge(WriteRel write)
+    {
+        var block = EmitRel(write.Input);
+        if (block.Columns.Count != write.ColumnNames.Count)
+            throw SubstraitTranslationException.MalformedPlan($"The MERGE names {write.ColumnNames.Count} roles for {block.Columns.Count} columns.");
+        string? tp = null, op = null;
+        var keys = new List<(string Column, string Name)>();
+        var updates = new List<(string Column, string Name)>();
+        var inserts = new List<(string Column, string Name)>();
+        for (int i = 0; i < write.ColumnNames.Count; i++)
+        {
+            string role = write.ColumnNames[i], name = "S." + Col(i);
+            if (role == "tp")
+                tp = name;
+            else if (role == "op")
+                op = name;
+            else if (role.StartsWith("k:", StringComparison.Ordinal))
+                keys.Add((role.Substring(2), name));
+            else if (role.StartsWith("u:", StringComparison.Ordinal))
+                updates.Add((role.Substring(2), name));
+            else if (role.StartsWith("i:", StringComparison.Ordinal))
+                inserts.Add((role.Substring(2), name));
+            else
+                throw SubstraitTranslationException.MalformedPlan($"The MERGE column role '{role}' is unknown.");
+        }
+        if (tp == null || op == null || keys.Count == 0)
+            throw SubstraitTranslationException.MalformedPlan("The MERGE has no key, tp or op column.");
+        string source = Select(block);
+        if (write.EnhancementValue == "check_duplicates")
+        {
+            // a target row two source rows would update or delete: the client's MERGE fails there
+            string changes = op + " IN (1, 2) AND " + tp + " = 1";
+            source = "SELECT S.*, CASE WHEN " + changes + " AND count(*) FILTER (WHERE " + changes + ") OVER (PARTITION BY "
+                     + string.Join(", ", keys.Select(k => k.Name)) + ") > 1 THEN error('MERGE INTO command cannot affect "
+                     + "the same target row more than once') END AS _check FROM (" + source + ") AS S";
+        }
+        string target = string.Join(".", write.TableNames.Select(Quote));
+        var sql = new StringBuilder("MERGE INTO ").Append(target).Append(" AS T USING (").Append(source).Append(") AS S ON ")
+            .Append(tp).Append(" = 1");
+        foreach (var (column, name) in keys)
+            sql.Append(" AND T.").Append(Quote(column)).Append(" IS NOT DISTINCT FROM ").Append(name);
+        if (updates.Count > 0)
+            sql.Append(" WHEN MATCHED AND ").Append(op).Append(" = 1 THEN UPDATE SET ")
+               .Append(string.Join(", ", updates.Select(u => Quote(u.Column) + " = " + u.Name)));
+        sql.Append(" WHEN MATCHED AND ").Append(op).Append(" = 2 THEN DELETE");
+        if (inserts.Count > 0)
+            sql.Append(" WHEN NOT MATCHED AND ").Append(op).Append(" = 3 THEN INSERT (")
+               .Append(string.Join(", ", inserts.Select(i => Quote(i.Column)))).Append(") VALUES (")
+               .Append(string.Join(", ", inserts.Select(i => i.Name))).Append(')');
+        return sql.ToString();
     }
 
     // ── relations ─────────────────────────────────────────────────────────────────────────────────────────
@@ -579,13 +641,24 @@ internal sealed class DuckDbEmitter
     }
 
     /// <summary>A join input: its WHERE may move above the join only on a side the join does not pad with NULLs.</summary>
+    /// <summary>
+    /// A join input. Its WHERE may move above the join only on a side the join does not pad with NULLs; and on such a
+    /// side every column must be a column of the FROM: a computed one (a constant, coalesce(x, 0)) written above the
+    /// join would give its value where the join pads the row with NULL.
+    /// </summary>
     private Block JoinSide(Block side, bool nullSupplying, bool isRight)
     {
-        if (!side.IsPlain || side.From == null || (nullSupplying && side.Where.Count > 0) || (isRight && side.FromIsJoin))
+        if (!side.IsPlain || side.From == null || (isRight && side.FromIsJoin)
+            || (nullSupplying && (side.Where.Count > 0 || !side.Columns.All(IsColumnReference))))
             side = Wrap(side, keepOrder: false);
         side.OrderBy.Clear();
         return side;
     }
+
+    private static readonly System.Text.RegularExpressions.Regex ColumnReference =
+        new(@"^t[0-9]+\.(_[0-9]+|""([^""]|"""")*"")$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    private static bool IsColumnReference(string sql) => ColumnReference.IsMatch(sql);
 
     private Block SemiJoin(JoinRel rel, Block left, Block right)
     {
@@ -1038,7 +1111,10 @@ internal sealed class DuckDbEmitter
     private static string Literal(LiteralExpr lit)
     {
         if (lit.IsNull)
-            return "CAST(NULL AS " + TypeName(lit.Type) + ")";
+        {
+            // a NULL with no type (the producer writes CAST(NULL AS …) that way): DuckDB types it from where it stands
+            return lit.Type.IsKnown ? "CAST(NULL AS " + TypeName(lit.Type) + ")" : "NULL";
+        }
         var inv = CultureInfo.InvariantCulture;
         switch (lit.Type.Kind)
         {
